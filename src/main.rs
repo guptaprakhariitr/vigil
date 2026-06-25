@@ -114,6 +114,22 @@ enum Cmd {
         #[arg(long, default_value = "vigil.db")]
         db: String,
     },
+    /// Learning loop: judge a finding (accept|reject) → deterministic Tier-1 rule delta.
+    Feedback {
+        /// accept | reject
+        verdict: String,
+        /// incident fingerprint prefix (see `vigil incidents`)
+        incident: String,
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        /// on reject: treat as pure noise → mute the template outright
+        #[arg(long)]
+        noise: bool,
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
     /// Token ledger: engine calls + estimated tokens for a project.
     Usage {
         #[arg(long, default_value = "default")]
@@ -157,6 +173,10 @@ fn sha_of(rc: &str) -> Option<&str> {
 fn est_tokens(bundle: &serde_json::Value) -> i64 {
     let chars = serde_json::to_string(bundle).map(|s| s.len()).unwrap_or(0);
     (chars / 4 + 600) as i64 // + a fixed allowance for the system prompt & reply
+}
+
+fn short_sig(s: &str) -> String {
+    s.chars().take(48).collect()
 }
 
 fn action_name(a: &vigil_engine::policy::Act) -> &'static str {
@@ -283,6 +303,9 @@ fn main() -> Result<()> {
                             store.upsert_incident(&project, &top.template_id, &top.template, sev, blast as i64, count)?;
                         if route == Route::Mute {
                             eprintln!("· +{} events · muted by policy ({}) — {}", n, why, top.template);
+                        } else if !is_new && store.is_resolved(id)? {
+                            // verified-recurring: a human already accepted a fix for this — don't re-spend.
+                            eprintln!("· +{} events · known/resolved incident ×{} — suppressed (no engine call)", n, count);
                         } else if is_new && route == Route::Escalate {
                             println!(
                                 "🔔 {} {} · NEW incident ×{} · blast {} — {}",
@@ -462,6 +485,40 @@ fn main() -> Result<()> {
                     println!("✓ {} → {}", &id[..id.len().min(12)], Route::parse(&route).as_str());
                 }
                 None => println!("no incident matches template id prefix '{template}'"),
+            }
+        }
+
+        Cmd::Feedback { verdict, incident, project, db, noise, reason } => {
+            let store = Store::open(&db)?;
+            let Some((id, tid, sig)) = store.incident_by_prefix(&project, &incident)? else {
+                println!("no incident matches '{incident}' in project {project}");
+                return Ok(());
+            };
+            match verdict.to_lowercase().as_str() {
+                "accept" => {
+                    store.set_verdict(id, "accept", &reason)?;
+                    // reinforce: this signature genuinely warrants escalation.
+                    store.set_route(&project, &tid, &sig, Route::Escalate.as_str(), "feedback")?;
+                    store.set_incident_status(id, "resolved")?;
+                    store.audit(&project, id, "feedback", "accept", &reason)?;
+                    println!("✓ accepted — incident resolved; '{}' stays escalate (verified-recurring will now suppress it)", short_sig(&sig));
+                }
+                "reject" => {
+                    store.set_verdict(id, "reject", &reason)?;
+                    // deterministic rule delta: noise → mute, else step the route down one rung.
+                    let cur = store
+                        .load_policy(&project)?
+                        .into_iter()
+                        .find(|r| r.template_id == tid)
+                        .map(|r| r.route)
+                        .unwrap_or(Route::Escalate);
+                    let next = if noise { Route::Mute } else { cur.demote() };
+                    store.set_route(&project, &tid, &sig, next.as_str(), "feedback")?;
+                    store.set_incident_status(id, "dismissed")?;
+                    store.audit(&project, id, "feedback", "reject", &format!("{} → {}", cur.as_str(), next.as_str()))?;
+                    println!("✓ rejected — '{}' demoted {} → {} (won't burn an engine call next time)", short_sig(&sig), cur.as_str(), next.as_str());
+                }
+                other => println!("unknown verdict '{other}' (use accept|reject)"),
             }
         }
 
