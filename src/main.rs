@@ -253,7 +253,11 @@ fn make_engine(no_engine: bool, engine: &str) -> Result<Box<dyn EngineAdapter>> 
     match engine {
         "anthropic-api" | "api" => Ok(Box::new(engine::AnthropicApi::from_env()?)),
         "claude-cli" | "claude" => Ok(Box::new(engine::ClaudeCli::default())),
-        other => Err(anyhow::anyhow!("unknown engine '{other}' (use claude-cli | anthropic-api | none)")),
+        "cursor-cli" | "cursor" => Ok(Box::new(engine::CursorCli::default())),
+        "local" | "ollama" => Ok(Box::new(engine::Ollama::default())),
+        other => Err(anyhow::anyhow!(
+            "unknown engine '{other}' (use claude-cli | cursor-cli | anthropic-api | local | none)"
+        )),
     }
 }
 
@@ -411,6 +415,13 @@ fn main() -> Result<()> {
                         } else if !is_new && store.is_resolved(id)? {
                             // verified-recurring: a human already accepted a fix for this — don't re-spend.
                             eprintln!("· +{} events · known/resolved incident ×{} — suppressed (no engine call)", n, count);
+                        } else if is_new
+                            && route == Route::Escalate
+                            && triage::nearest(&top.template, &store.resolved_signatures(&project)?, 0.9).is_some()
+                        {
+                            // lexical novelty: a near-identical signature was already fixed → not novel.
+                            store.set_incident_status(id, "resolved")?;
+                            eprintln!("· +{} events · near-duplicate of a resolved incident — suppressed (no engine call)", n);
                         } else if is_new && route == Route::Escalate {
                             println!(
                                 "🔔 {} {} · NEW incident ×{} · blast {} — {}",
