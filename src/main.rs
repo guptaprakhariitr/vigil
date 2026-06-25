@@ -5,6 +5,8 @@
 //!   status       — health + footprint
 //!   incidents    — list grouped incidents from the store
 
+mod dash;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -121,6 +123,27 @@ enum Cmd {
         project: String,
         #[arg(long, default_value = "vigil.db")]
         db: String,
+    },
+    /// Live terminal dashboard (incidents, policy, health) — refreshes in place.
+    Tui {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value_t = 3)]
+        interval: u64,
+        /// render one frame and exit (for testing)
+        #[arg(long)]
+        once: bool,
+    },
+    /// Read-only web dashboard on localhost (CLI↔TUI↔Web parity).
+    Serve {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
     },
     /// Show daemon health: events seen, open incidents, footprint.
     Status {
@@ -655,6 +678,13 @@ fn main() -> Result<()> {
             let store = Store::open(&db)?;
             store.set_paused(&project, false)?;
             println!("▶ resumed {}", if project == "*" { "all projects".into() } else { project });
+        }
+
+        Cmd::Tui { project, db, interval, once } => {
+            dash::tui(&db, &project, interval, once)?;
+        }
+        Cmd::Serve { project, db, port } => {
+            dash::serve(&db, &project, port)?;
         }
 
         Cmd::Status { db } => {
