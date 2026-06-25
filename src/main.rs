@@ -149,6 +149,22 @@ enum Cmd {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// Calibration sweep (§4b): the engine proposes Tier-1 policy deltas from
+    /// labeled outcomes; applied only if it passes the escalate-recall gate.
+    Calibrate {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value = "claude-cli")]
+        engine: String,
+        /// Escalate-recall gate a proposal must meet to auto-apply.
+        #[arg(long, default_value_t = 0.98)]
+        gate: f64,
+        /// Apply a passing proposal (default: dry-run, just report).
+        #[arg(long)]
+        apply: bool,
+    },
     /// Token ledger: engine calls + estimated tokens for a project.
     Usage {
         #[arg(long, default_value = "default")]
@@ -230,11 +246,14 @@ enum ProjectCmd {
     },
 }
 
-fn make_engine(no_engine: bool, engine: &str) -> Box<dyn EngineAdapter> {
+fn make_engine(no_engine: bool, engine: &str) -> Result<Box<dyn EngineAdapter>> {
     if no_engine || engine == "none" {
-        Box::new(engine::NullEngine)
-    } else {
-        Box::new(engine::ClaudeCli::default())
+        return Ok(Box::new(engine::NullEngine));
+    }
+    match engine {
+        "anthropic-api" | "api" => Ok(Box::new(engine::AnthropicApi::from_env()?)),
+        "claude-cli" | "claude" => Ok(Box::new(engine::ClaudeCli::default())),
+        other => Err(anyhow::anyhow!("unknown engine '{other}' (use claude-cli | anthropic-api | none)")),
     }
 }
 
@@ -316,7 +335,7 @@ fn main() -> Result<()> {
             if show_bundle {
                 eprintln!("--- evidence bundle ---\n{}", serde_json::to_string_pretty(&seed)?);
             }
-            let adapter = make_engine(no_engine, &engine);
+            let adapter = make_engine(no_engine, &engine)?;
             eprintln!("· engine: {}", adapter.name());
             let finding = adapter.investigate(&seed).unwrap_or_else(|e| {
                 eprintln!("! engine failed ({e}); deterministic report only");
@@ -352,23 +371,29 @@ fn main() -> Result<()> {
                     ))
                 }
             };
-            let adapter = make_engine(no_engine, &engine);
+            let adapter = make_engine(no_engine, &engine)?;
             let policy = store.load_policy(&project)?;
             let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
             eprintln!(
                 "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules · autonomy={}\n  (read-only · Ctrl-C to stop)",
                 project, path.display(), adapter.name(), db, policy.len(), autonomy.as_str()
             );
-            let mut processed = 0usize;
+            // Resume from the persisted offset so a restart doesn't re-ingest.
+            let path_key = path.display().to_string();
+            let mut processed = store.get_cursor(&project, &path_key)?;
             let mut iter = 0u64;
             loop {
                 iter += 1;
                 let events = ingest::ingest_path(&path, &project)?;
+                if events.len() < processed {
+                    processed = 0; // file rotated/truncated — start over
+                }
                 if events.len() > processed {
                     let fresh = &events[processed..];
                     store.insert_events(&project, fresh)?;
                     let n = fresh.len();
                     processed = events.len();
+                    store.set_cursor(&project, &path_key, processed)?;
 
                     // detect: dominant error signature over everything seen
                     let incident = correlate::correlate(&events, repo.as_deref());
@@ -427,7 +452,7 @@ fn main() -> Result<()> {
                     return Err(anyhow::anyhow!("no path and project '{project}' not registered"))
                 }
             };
-            let adapter = make_engine(no_engine, &engine);
+            let adapter = make_engine(no_engine, &engine)?;
             let policy = store.load_policy(&project)?;
             let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
             let events = ingest::ingest_path(&path, &project)?;
@@ -528,7 +553,7 @@ fn main() -> Result<()> {
 
         Cmd::Warm { path, project, db, engine, context } => {
             let store = Store::open(&db)?;
-            let adapter = make_engine(false, &engine);
+            let adapter = make_engine(false, &engine)?;
             let events = ingest::ingest_path(&path, &project)?;
             let incident = correlate::correlate(&events, None);
             let templates: Vec<(String, String, usize)> = incident
@@ -606,6 +631,38 @@ fn main() -> Result<()> {
                     println!("✓ rejected — '{}' demoted {} → {} (won't burn an engine call next time)", short_sig(&sig), cur.as_str(), next.as_str());
                 }
                 other => println!("unknown verdict '{other}' (use accept|reject)"),
+            }
+        }
+
+        Cmd::Calibrate { project, db, engine, gate, apply } => {
+            let store = Store::open(&db)?;
+            let adapter = make_engine(false, &engine)?;
+            let current = store.load_policy(&project)?;
+            let labeled = store.labeled_incidents(&project)?;
+            if labeled.is_empty() {
+                println!("(no labeled outcomes yet — use `vigil feedback accept|reject` first)");
+                return Ok(());
+            }
+            let golden = vigil_engine::calibrate::golden(&labeled);
+            store.record_usage(&project, "calibrate", 1200)?;
+            let c = vigil_engine::calibrate::calibrate(adapter.as_ref(), &project, &current, &golden, gate)?;
+            println!(
+                "calibration · {} labeled · {} proposed change(s) · escalate-recall {:.2} (gate {:.2}) → {}",
+                labeled.len(), c.proposed.len(), c.recall, c.gate,
+                if c.applied { "PASSES" } else { "BLOCKED (kept current)" }
+            );
+            for r in &c.proposed {
+                println!("    {:<9} {}", r.route.as_str(), short_sig(&r.signature));
+            }
+            if c.applied && apply {
+                store.save_policy(&project, &c.proposed)?;
+                store.audit(&project, 0, "calibrate", "applied", &format!("recall {:.2} ≥ {:.2}", c.recall, c.gate))?;
+                println!("✓ applied (source=calibration)");
+            } else if c.applied {
+                println!("· dry-run — re-run with --apply to persist");
+            } else {
+                store.audit(&project, 0, "calibrate", "blocked", &format!("recall {:.2} < {:.2}", c.recall, c.gate))?;
+                println!("· proposal would regress escalate-recall — surfaced as suggestion, NOT applied");
             }
         }
 
