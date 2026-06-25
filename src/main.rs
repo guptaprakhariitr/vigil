@@ -341,6 +341,13 @@ enum ProjectCmd {
         #[arg(long, default_value = "vigil.db")]
         db: String,
     },
+    /// Attach another log source (a container/service) to an existing project.
+    AddSource {
+        name: String,
+        path: PathBuf,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
 }
 
 fn make_engine(no_engine: bool, engine: &str) -> Result<Box<dyn EngineAdapter>> {
@@ -448,7 +455,7 @@ fn own_rss_mb() -> Option<u64> {
 fn process_project_once(
     store: &mut Store,
     project: &str,
-    path: &std::path::Path,
+    sources: &[std::path::PathBuf],
     repo: Option<&std::path::Path>,
     adapter: &dyn EngineAdapter,
     autonomy: vigil_engine::policy::Autonomy,
@@ -456,27 +463,36 @@ fn process_project_once(
     policy: &[vigil_engine::triage::PolicyRule],
     budget: &mut Option<i64>,
 ) -> Result<()> {
-    let path_key = path.display().to_string();
-    let mut processed = store.get_cursor(project, &path_key)?;
-    let events = ingest::ingest_path(path, project)?;
-    if events.len() < processed {
-        processed = 0; // rotation
+    // Ingest EVERY source of the project and correlate them together, so a
+    // shared-dependency failure across services is one incident (§3a). Each
+    // source has its own persisted cursor; `service` is parsed from content.
+    let mut all_events = Vec::new();
+    let mut n = 0usize;
+    for src in sources {
+        let key = src.display().to_string();
+        let mut processed = store.get_cursor(project, &key)?;
+        let events = ingest::ingest_path(src, project)?;
+        if events.len() < processed {
+            processed = 0; // rotation
+        }
+        if events.len() > processed {
+            store.insert_events(project, &events[processed..])?;
+            n += events.len() - processed;
+            store.set_cursor(project, &key, events.len())?;
+        }
+        all_events.extend(events);
     }
-    if events.len() <= processed {
-        return Ok(()); // nothing new
+    if n == 0 {
+        return Ok(()); // nothing new across any source
     }
-    let fresh = &events[processed..];
-    store.insert_events(project, fresh)?;
-    let n = fresh.len();
-    store.set_cursor(project, &path_key, events.len())?;
 
-    let incident = correlate::correlate(&events, repo);
+    let incident = correlate::correlate(&all_events, repo);
     let Some(top) = incident.top.clone() else {
         eprintln!("· [{project}] +{n} events · no incident (healthy)");
         return Ok(());
     };
     let count = top.count as i64;
-    let blast = detect::blast_radius(&events, &top.template_id);
+    let blast = detect::blast_radius(&all_events, &top.template_id);
     let sev = detect::severity(top.count, blast);
     let cand = Candidate { template_id: &top.template_id, signature: &top.template, count: top.count, blast };
     let (route, why) = triage::route(policy, &cand);
@@ -549,6 +565,7 @@ fn main() -> Result<()> {
             // Resolve config: an explicit <path> is an ad-hoc run; otherwise load
             // the registered project's saved watch config (Phase 4).
             let reg = store.get_project(&project)?;
+            let path_was_explicit = path.is_some();
             let (path, repo, engine, autonomy, min_confidence) = match (path, &reg) {
                 (Some(p), _) => (p, repo, engine, autonomy, min_confidence),
                 (None, Some(pr)) => (
@@ -568,15 +585,23 @@ fn main() -> Result<()> {
             let policy = store.load_policy(&project)?;
             let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
             eprintln!(
-                "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules · autonomy={}\n  (read-only · Ctrl-C to stop)",
-                project, path.display(), adapter.name(), db, policy.len(), autonomy.as_str()
+                "▶ vigil up · project={} · engine={} · db={} · policy={} rules · autonomy={}\n  (read-only · Ctrl-C to stop)",
+                project, adapter.name(), db, policy.len(), autonomy.as_str()
             );
             maybe_consent_notice(&store);
+            // An explicit <path> is a single ad-hoc source; otherwise watch all
+            // of the registered project's sources (a project = one system).
+            let sources: Vec<PathBuf> = if path_was_explicit {
+                vec![path.clone()]
+            } else {
+                store.list_sources(&project)?.into_iter().map(PathBuf::from).collect()
+            };
+            eprintln!("  · watching {} source(s)", sources.len());
             let mut iter = 0u64;
             let mut budget: Option<i64> = None; // single-project up: no global cap
             loop {
                 iter += 1;
-                process_project_once(&mut store, &project, &path, repo.as_deref(), adapter.as_ref(), autonomy, min_confidence, &policy, &mut budget)?;
+                process_project_once(&mut store, &project, &sources, repo.as_deref(), adapter.as_ref(), autonomy, min_confidence, &policy, &mut budget)?;
                 if once || (max_iterations != 0 && iter >= max_iterations) {
                     break;
                 }
@@ -587,6 +612,7 @@ fn main() -> Result<()> {
         Cmd::Sweep { path, repo, project, db, engine, no_engine, autonomy, min_confidence } => {
             let mut store = Store::open(&db)?;
             let reg = store.get_project(&project)?;
+            let path_was_explicit = path.is_some();
             let (path, repo, engine, autonomy, min_confidence) = match (path, &reg) {
                 (Some(p), _) => (p, repo, engine, autonomy, min_confidence),
                 (None, Some(pr)) => (
@@ -603,12 +629,21 @@ fn main() -> Result<()> {
             let adapter = make_engine(no_engine, &engine)?;
             let policy = store.load_policy(&project)?;
             let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
-            let events = ingest::ingest_path(&path, &project)?;
+            // Sweep across all of the project's sources together (§3a).
+            let sources: Vec<PathBuf> = if path_was_explicit {
+                vec![path.clone()]
+            } else {
+                store.list_sources(&project)?.into_iter().map(PathBuf::from).collect()
+            };
+            let mut events = Vec::new();
+            for src in &sources {
+                events.extend(ingest::ingest_path(src, &project)?);
+            }
             store.insert_events(&project, &events)?;
             let incident = correlate::correlate(&events, repo.as_deref());
             eprintln!(
-                "▶ vigil sweep · project={} · {} events · {} templates · engine={} · autonomy={}",
-                project, events.len(), incident.clusters.len(), adapter.name(), autonomy.as_str()
+                "▶ vigil sweep · project={} · {} source(s) · {} events · {} templates · engine={} · autonomy={}",
+                project, sources.len(), events.len(), incident.clusters.len(), adapter.name(), autonomy.as_str()
             );
             let mut investigated = 0;
             let mut skipped = 0;
@@ -666,9 +701,9 @@ fn main() -> Result<()> {
                     let adapter = make_engine(no_engine, &p.engine)?;
                     let policy = store.load_policy(&p.name)?;
                     let autonomy = vigil_engine::policy::Autonomy::parse(&p.autonomy);
-                    let path = PathBuf::from(&p.log_path);
+                    let sources: Vec<PathBuf> = store.list_sources(&p.name)?.into_iter().map(PathBuf::from).collect();
                     let repo = p.repo.clone().map(PathBuf::from);
-                    process_project_once(&mut store, &p.name, &path, repo.as_deref(), adapter.as_ref(), autonomy, p.min_confidence, &policy, &mut tick_budget)?;
+                    process_project_once(&mut store, &p.name, &sources, repo.as_deref(), adapter.as_ref(), autonomy, p.min_confidence, &policy, &mut tick_budget)?;
                     if !rss_block {
                         budget = tick_budget; // persist real spend (RSS backoff is temporary)
                     }
@@ -756,16 +791,27 @@ fn main() -> Result<()> {
                 }
                 for p in &projects {
                     let (open, top) = store.open_incident_count(&p.name)?;
+                    let srcs = store.list_sources(&p.name)?;
                     println!(
-                        "  {:<16} {:<8} conf≥{:.2}  {} open  {}",
+                        "  {:<16} {:<8} conf≥{:.2}  {} src  {} open  {}",
                         p.name,
                         p.autonomy,
                         p.min_confidence,
+                        srcs.len(),
                         open,
-                        top.as_deref().map(|s| trunc(s, 80)).unwrap_or_else(|| "—".into())
+                        top.as_deref().map(|s| trunc(s, 72)).unwrap_or_else(|| "—".into())
                     );
-                    println!("      watch {}{}", p.log_path, p.repo.as_ref().map(|r| format!(" · repo {r}")).unwrap_or_default());
+                    println!("      sources: {}{}", srcs.join(", "), p.repo.as_ref().map(|r| format!("  · repo {r}")).unwrap_or_default());
                 }
+            }
+            ProjectCmd::AddSource { name, path, db } => {
+                let store = Store::open(&db)?;
+                if store.get_project(&name)?.is_none() {
+                    return Err(anyhow::anyhow!("project '{name}' is not registered — `vigil project add {name} <logs>` first"));
+                }
+                store.add_source(&name, &path.display().to_string())?;
+                let srcs = store.list_sources(&name)?;
+                println!("✓ added source to '{name}' ({} total): {}", srcs.len(), srcs.join(", "));
             }
         },
 
