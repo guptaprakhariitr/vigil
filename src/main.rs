@@ -391,6 +391,7 @@ fn escalate(
     let repo_str = repo.map(|p| p.display().to_string());
     let host = store.metrics_summary(project, 60)?; // resource pressure near the window
     let seed = bundle::build_with_host(incident, project, repo_str.as_deref(), host);
+    let _ = store.set_evidence(id, &serde_json::to_string(&seed).unwrap_or_default()); // for the detail screen
     let est = est_tokens(&seed);
     store.record_usage(project, "investigate", est)?;
     match adapter.investigate(&seed) {
@@ -401,12 +402,15 @@ fn escalate(
             store.audit(project, id, "investigate", "finding", &short)?;
             let base = incident.recent_change.as_deref().and_then(sha_of);
             let mut validated = false;
+            let mut vsum = String::new();
+            let mut branch_label = String::new();
             if let (Some(patch), Some(r)) = (f.patch.as_ref(), repo) {
                 match validate::validate_patch(r, base, patch, None) {
                     Ok(v) => {
                         println!("   ↳ patch: {} [{}]", v.summary(), v.files.join(", "));
                         store.audit(project, id, "validate", if v.ok() { "ok" } else { "reject" }, &v.summary())?;
                         validated = v.ok();
+                        vsum = v.summary();
                     }
                     Err(e) => eprintln!("   ! validation error: {e}"),
                 }
@@ -415,10 +419,12 @@ fn escalate(
             if let Act::OpenPr { auto_merge } = d.act {
                 if let (Some(patch), Some(r), Some(b)) = (f.patch.as_ref(), repo, base) {
                     let branch = format!("vigil/fix-{}", &top.template_id[..top.template_id.len().min(8)]);
+                    branch_label = branch.clone();
                     let title = format!("fix: {}", short.replace('\n', " "));
                     match vigil_engine::act::open_pr(r, b, &branch, patch, &title, &f.cause, auto_merge) {
                         Ok(p) => {
                             let where_ = p.pr_url.clone().unwrap_or_else(|| format!("branch {}", p.branch));
+                            branch_label = where_.clone();
                             println!("   ↳ proposed: {} — {}", where_, p.details.join("; "));
                             store.audit(project, id, "act", "open_pr", &where_)?;
                         }
@@ -427,6 +433,9 @@ fn escalate(
                 }
             } else {
                 eprintln!("   ↳ gate: {} ({})", action_name(&d.act), d.reason);
+            }
+            if let Some(patch) = f.patch.as_ref() {
+                let _ = store.attach_patch(id, patch, &vsum, &branch_label); // for the UI detail/Patches
             }
         }
         Ok(f) => println!("   ↳ engine abstained: {}", f.reason.unwrap_or_default()),
