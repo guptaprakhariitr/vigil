@@ -192,8 +192,27 @@ details.tpl pre{margin:0;padding:9px 11px;border-top:1px solid var(--line);font:
 .flash{background:var(--tealbg);border:1px solid #bfe6dd;color:var(--teal);border-radius:9px;padding:10px 13px;margin-bottom:14px;font-size:13px}
 .flash.bad{background:#fde6e0;border-color:#f4c9bd;color:#c2492e}
 pre.out{background:#0E0B07;color:#cdbf9c;border-radius:9px;padding:13px 15px;overflow-x:auto;font:11.5px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word}
+.thinking{display:flex;align-items:center;gap:10px;color:var(--accent);font:13px ui-monospace,monospace;padding:6px 2px}
+.thinking .sh{display:inline-block;width:14px;height:14px;border:2px solid #f0ddb5;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.thinking .dots::after{content:'';animation:dots 1.3s steps(4,end) infinite}
+@keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
+#ans{opacity:0;transition:opacity .45s ease}#ans.show{opacity:1}
+.btn[disabled]{opacity:.55;cursor:not-allowed;background:#e0d8c8;border-color:#e0d8c8;color:#9a8f7c}
 footer{margin-top:26px;color:#a89c86;font:11px ui-monospace,monospace}
 "#;
+
+const POLLER_JS: &str = r#"<script>(function(){
+var p=["Reading incidents","Correlating evidence","Checking the deploy timeline","Mapping stack → source","Reasoning over the bundle","Composing a cited answer"];
+var i=0,el=document.getElementById('phr');
+var t=setInterval(function(){i=(i+1)%p.length;if(el)el.textContent=p[i];},1800);
+function poll(){fetch(location.pathname+location.search+'&poll=1').then(function(r){return r.json()}).then(function(d){
+ if(d.status==='done'||d.status==='error'){clearInterval(t);
+  var th=document.querySelector('.thinking');if(th)th.style.display='none';
+  var a=document.getElementById('ans');a.innerHTML=d.html;a.classList.add('show');
+  var b=document.querySelector('button[type=submit]');if(b){b.disabled=false;b.textContent='Ask';}
+ }else{setTimeout(poll,1500)}}).catch(function(){setTimeout(poll,2000)})}
+setTimeout(poll,1000);})();</script>"#;
 
 const SPRITE: &str = r##"<svg width="0" height="0" style="position:absolute" aria-hidden="true">
 <symbol id="i-proj" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></symbol>
@@ -235,14 +254,32 @@ fn shell(rail_active: &str, crumb: &str, title: &str, body: &str) -> String {
     )
 }
 
-/// Make the engine's plain-text cause readable: `backtick`→<code> and grouped
+enum AskState { None, Running, Done(bool, String) }
+
+fn qhash(q: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    q.trim().to_lowercase().hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// **bold** → <strong> on already-escaped text (balanced pairs).
+fn bold(s: &str) -> String {
+    let mut out = String::new();
+    for (i, seg) in s.split("**").enumerate() {
+        if i % 2 == 1 { out.push_str(&format!("<strong>{seg}</strong>")); } else { out.push_str(seg); }
+    }
+    out
+}
+
+/// Make the engine's markdown-ish cause readable: **bold**, `code`, grouped
 /// into short paragraphs. Input is escaped first (single pass; robust).
 fn format_cause(s: &str) -> String {
     let escd = esc(s);
-    // backtick code spans: odd-index segments are inside backticks
+    // backtick code spans: odd-index segments are inside backticks; bold the rest
     let mut html = String::new();
     for (i, seg) in escd.split('`').enumerate() {
-        if i % 2 == 1 { html.push_str(&format!("<code>{seg}</code>")); } else { html.push_str(seg); }
+        if i % 2 == 1 { html.push_str(&format!("<code>{seg}</code>")); } else { html.push_str(&bold(seg)); }
     }
     // group ~2 sentences per paragraph for readability
     let sentences: Vec<&str> = html.split_inclusive(". ").collect();
@@ -307,14 +344,40 @@ pub fn route(store: &Store, db: &str, default_project: &str, method: &str, path:
             let q = form_get(query, "q").filter(|s| !s.is_empty());
             let proj = form_get(query, "project").filter(|s| !s.is_empty())
                 .or_else(|| store.list_projects().ok().and_then(|ps| ps.into_iter().map(|p| p.name).next()));
-            let answer = match (&q, &proj) {
+            let poll = form_get(query, "poll").is_some();
+            match (&q, &proj) {
                 (Some(q), Some(pr)) => {
-                    let (ok, out) = run_vigil(db, &["ask", q, "--project", pr]);
-                    Some((ok, out))
+                    let h = qhash(q);
+                    let st = store.ask_status(pr, &h)?;
+                    if poll {
+                        // JSON status for the in-page poller (no full reload → no re-fire)
+                        let (status, body_html) = match st {
+                            Some((s, a)) if s == "done" => ("done", format_cause(&a)),
+                            Some((s, a)) if s == "error" => ("error", format!("<div class=flash bad>{}</div>", esc(&a))),
+                            _ => ("running", String::new()),
+                        };
+                        let body = serde_json::json!({"status": status, "html": body_html}).to_string();
+                        Resp { status: 200, ctype: "application/json".into(), body, location: None }
+                    } else {
+                        match st {
+                            Some((s, a)) if s == "done" => html(page_ask(store, Some(q), Some(pr), AskState::Done(true, a))?),
+                            Some((s, a)) if s == "error" => html(page_ask(store, Some(q), Some(pr), AskState::Done(false, a))?),
+                            _ => {
+                                // start the engine once, in the background (cached by qhash)
+                                if store.ask_begin(pr, &h, q)? {
+                                    let (db2, pr2, h2, q2) = (db.to_string(), pr.clone(), h.clone(), q.clone());
+                                    std::thread::spawn(move || {
+                                        let (ok, out) = run_vigil(&db2, &["ask", &q2, "--project", &pr2]);
+                                        if let Ok(s) = Store::open(&db2) { let _ = s.ask_finish(&pr2, &h2, &out, ok); }
+                                    });
+                                }
+                                html(page_ask(store, Some(q), Some(pr), AskState::Running)?)
+                            }
+                        }
+                    }
                 }
-                _ => None,
-            };
-            html(page_ask(store, q.as_deref(), proj.as_deref(), answer)?)
+                _ => html(page_ask(store, q.as_deref(), proj.as_deref(), AskState::None)?),
+            }
         }
         ["settings"] => html(page_settings_sys(store)?),
         ["p", proj] => html(page_overview(store, proj)?),
@@ -590,21 +653,31 @@ fn page_all_patches(store: &Store) -> Result<String> {
     Ok(shell("pat", "patches · all", "Patches", &body))
 }
 
-fn page_ask(store: &Store, question: Option<&str>, project: Option<&str>, answer: Option<(bool, String)>) -> Result<String> {
+fn page_ask(store: &Store, question: Option<&str>, project: Option<&str>, state: AskState) -> Result<String> {
     let projects = store.list_projects()?;
     let opts: String = projects.iter().map(|p| {
         let sel = if Some(p.name.as_str()) == project { " selected" } else { "" };
         format!("<option{sel}>{}</option>", esc(&p.name))
     }).collect();
     let qval = question.map(esc).unwrap_or_default();
-    let ans = match answer {
-        Some((ok, out)) => {
-            let cls = if ok { "" } else { "bad" };
-            format!("<div class=card><div class=sub>Q: {}</div><div class=\"cause cause2\">{}</div></div>",
-                esc(question.unwrap_or("")),
-                if ok { format_cause(&out) } else { format!("<div class=flash {cls}>{}</div>", esc(&out)) })
-        }
-        None => String::new(),
+    let running = matches!(state, AskState::Running);
+    // greyed/disabled while a question is in flight — prevents double-asks
+    let askbtn = if running {
+        "<button class=\"btn pri\" type=submit disabled>Asking…</button>".to_string()
+    } else {
+        "<button class=\"btn pri\" type=submit onclick=\"this.disabled=true;this.textContent='Asking…'\">Ask</button>".to_string()
+    };
+    let ans = match &state {
+        AskState::Done(ok, out) => format!(
+            "<div class=card><div class=sub>Q: {}</div><div id=ans class=\"cause cause2 show\">{}</div></div>",
+            esc(question.unwrap_or("")),
+            if *ok { format_cause(out) } else { format!("<div class=flash bad>{}</div>", esc(out)) }),
+        AskState::Running => format!(
+            "<div class=card><div class=sub>Q: {}</div>\
+<div class=thinking><span class=sh></span><span id=phr>Reading incidents</span><span class=dots></span></div>\
+<div id=ans class=\"cause cause2\"></div></div>{POLLER_JS}",
+            esc(question.unwrap_or(""))),
+        AskState::None => String::new(),
     };
     let mut ctx = String::new();
     for pr in &projects {
@@ -615,8 +688,8 @@ fn page_ask(store: &Store, question: Option<&str>, project: Option<&str>, answer
     let body = format!(
         "<h1>Ask VigilAI</h1><p class=sub>natural-language questions over your incidents — runs on your engine, grounded &amp; cited</p>\
 <form class=ask method=get action=/ask><select name=project>{opts}</select>\
-<input name=q placeholder=\"why are 502s up since the deploy?\" value=\"{qval}\"><button class=\"btn pri\" type=submit>Ask</button></form>\
-{ans}<p class=sub>(Runs <code>vigil ask</code> on the selected project's engine — may take a few seconds.)</p>\
+<input name=q placeholder=\"why are 502s up since the deploy?\" value=\"{qval}\">{askbtn}</form>\
+{ans}<p class=sub>(Runs <code>vigil ask</code> on the selected project's engine — answers stream in; the same question is cached, so reloads don't re-ask.)</p>\
 <h2>Context</h2><div class=tablewrap><table><colgroup><col class=md><col class=sm><col class=sigcol></colgroup>\
 <tr><th>Project</th><th>Open</th><th>Top incident</th></tr>{ctx}</table></div>"
     );
@@ -967,45 +1040,50 @@ pub fn serve(db: &str, project: &str, port: u16, token_arg: Option<String>) -> R
     eprintln!("  open:  http://127.0.0.1:{port}/?token={token}");
     eprintln!("  (set your own with --token; Ctrl-C to stop)");
     for stream in listener.incoming() {
-        let mut s = match stream { Ok(s) => s, Err(_) => continue };
-        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        let mut buf = vec![0u8; 16384];
-        let nread = s.read(&mut buf).unwrap_or(0);
-        let req = String::from_utf8_lossy(&buf[..nread]);
-        let reqline = req.lines().next().unwrap_or("");
-        let method = reqline.split_whitespace().next().unwrap_or("GET");
-        let path = reqline.split_whitespace().nth(1).unwrap_or("/");
-        let form = req.split("\r\n\r\n").nth(1).unwrap_or("");
-        let query = path.split('?').nth(1).unwrap_or("");
-        let qtoken = form_get(query, "token");
-        let ctoken = cookie_token(&req);
-
-        // --- auth gate ---
-        let authed = ctoken.as_deref() == Some(token.as_str()) || qtoken.as_deref() == Some(token.as_str());
-        if !authed {
-            let page = login_page(qtoken.is_some());
-            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", page.len(), page);
-            let _ = s.write_all(head.as_bytes());
-            continue;
-        }
-        // fresh login via ?token= → set cookie and redirect to the clean path
-        if qtoken.as_deref() == Some(token.as_str()) && ctoken.as_deref() != Some(token.as_str()) {
-            let clean = path.split('?').next().unwrap_or("/");
-            let head = format!("HTTP/1.1 303 See Other\r\nLocation: {clean}\r\nSet-Cookie: vigil_token={token}; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-            let _ = s.write_all(head.as_bytes());
-            continue;
-        }
-
-        let store = Store::open(db)?;
-        let resp = route(&store, db, project, method, path, form).unwrap_or_else(|e| {
-            html(format!("<h1>error</h1><pre>{}</pre>", esc(&e.to_string())))
-        });
-        let head = match &resp.location {
-            Some(loc) => format!("HTTP/1.1 303 See Other\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
-            None => format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                resp.status, resp.ctype, resp.body.len(), resp.body),
-        };
-        let _ = s.write_all(head.as_bytes());
+        let s = match stream { Ok(s) => s, Err(_) => continue };
+        // One thread per connection so a slow engine call (Ask/Sweep) never
+        // freezes the rest of the UI. SQLite WAL + busy_timeout handle concurrency.
+        let (db, project, token) = (db.to_string(), project.to_string(), token.clone());
+        std::thread::spawn(move || handle_conn(s, &db, &project, &token));
     }
     Ok(())
+}
+
+fn handle_conn(mut s: std::net::TcpStream, db: &str, project: &str, token: &str) {
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(8)));
+    let mut buf = vec![0u8; 16384];
+    let nread = s.read(&mut buf).unwrap_or(0);
+    let req = String::from_utf8_lossy(&buf[..nread]);
+    let reqline = req.lines().next().unwrap_or("");
+    let method = reqline.split_whitespace().next().unwrap_or("GET");
+    let path = reqline.split_whitespace().nth(1).unwrap_or("/");
+    let form = req.split("\r\n\r\n").nth(1).unwrap_or("");
+    let query = path.split('?').nth(1).unwrap_or("");
+    let qtoken = form_get(query, "token");
+    let ctoken = cookie_token(&req);
+
+    let authed = ctoken.as_deref() == Some(token) || qtoken.as_deref() == Some(token);
+    if !authed {
+        let page = login_page(qtoken.is_some());
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", page.len(), page);
+        let _ = s.write_all(head.as_bytes());
+        return;
+    }
+    if qtoken.as_deref() == Some(token) && ctoken.as_deref() != Some(token) {
+        let clean = path.split('?').next().unwrap_or("/");
+        let head = format!("HTTP/1.1 303 See Other\r\nLocation: {clean}\r\nSet-Cookie: vigil_token={token}; Path=/; HttpOnly; SameSite=Strict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let _ = s.write_all(head.as_bytes());
+        return;
+    }
+    let resp = match Store::open(db) {
+        Ok(store) => route(&store, db, project, method, path, form)
+            .unwrap_or_else(|e| html(format!("<h1>error</h1><pre>{}</pre>", esc(&e.to_string())))),
+        Err(e) => html(format!("<h1>store error</h1><pre>{}</pre>", esc(&e.to_string()))),
+    };
+    let head = match &resp.location {
+        Some(loc) => format!("HTTP/1.1 303 See Other\r\nLocation: {loc}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+        None => format!("HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            resp.status, resp.ctype, resp.body.len(), resp.body),
+    };
+    let _ = s.write_all(head.as_bytes());
 }
