@@ -76,6 +76,7 @@ Investigate **every** open escalate-routed incident in one pass (not just the do
 | `vigil usage` | token ledger — engine calls + estimated tokens for the project. |
 | `vigil audit [--limit n]` | append-only trail of every decision (investigate/validate/act/feedback/calibrate). |
 | `vigil ask "<question>"` | natural-language answer over the project's stored incidents/findings, cited; refuses to speculate. |
+| `vigil metrics` | host metrics: current load average + memory + recent peaks + a resource-**pressure** verdict (OOM/saturation). Sampled read-only from `/proc` (Linux/container); the daemon records them so the engine can correlate "load/OOM caused the crash." |
 | `vigil tui` | live terminal dashboard (refreshes in place). `--interval`, `--once`. |
 | `vigil serve` | read-only web dashboard on localhost. `--port` (default 8787). `GET /` HTML, `GET /api/incidents` JSON. |
 

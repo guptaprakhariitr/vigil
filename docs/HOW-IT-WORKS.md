@@ -20,8 +20,10 @@ ingest → template-mine → correlate → detect → triage (Tier-1) → invest
 5. **Triage (Tier-1)** — a deterministic per-project policy routes the candidate: **mute / watch /
    escalate**. This runs on the hot path: sub-millisecond, **zero tokens**, fully auditable.
 6. **Investigate (engine)** — only an *escalated, novel* incident gets a single LLM call. It receives a
-   compact **evidence bundle** (clusters, stack→source snippet, recent diff) and must reply with a
-   schema-constrained finding: cause, confidence, citations, optional patch — or **abstain**.
+   compact **evidence bundle** (clusters, stack→source snippet, recent diff, and **host metrics** —
+   load/memory pressure near the window) and must reply with a schema-constrained finding: cause,
+   confidence, citations, optional patch — or **abstain**. The host metrics let it weigh resource
+   causes (OOM, CPU saturation), not just code — `vigil metrics` shows the same data.
 7. **Validate** — any proposed patch is applied in a throwaway **git worktree branched off your deployed
    SHA**, never your working copy. Secret-bearing patches are refused before apply; tests run if configured.
 8. **Gate + act** — the **autonomy dial** decides what's allowed: notify → report → propose (PR) →

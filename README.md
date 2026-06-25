@@ -4,6 +4,35 @@ The on-call engineer that runs on your **own** box. Point it at your logs; it fi
 cites the evidence, and (if you let it) opens a fix PR. Your infra, your engine (Claude / Cursor /
 API / local), your autonomy dial.
 
+## Get started with your coding agent
+
+The fastest way to set this up is to let **Claude Code** (or **Cursor**) do it. Paste this prompt:
+
+```
+Run npx skills add guptaprakhariitr/vigil --all and use the setup-vigil skill to set up VigilAI in this project
+```
+
+<details>
+<summary><b>What will the agent do?</b></summary>
+
+> *via guptaprakhariitr/vigil — the `setup-vigil` skill*
+>
+> 1. **Map your system** — find the app's services/containers and where each writes logs
+> 2. **Build/get `vigil`** and point it at those logs (read-only)
+> 3. **Register them as ONE project** with all sources (a system, not one-project-per-container)
+> 4. **Connect your engine** — your logged-in Claude/Cursor, an API key, or a local model
+> 5. **Warm the Tier-1 policy** (one call drafts mute/watch/escalate) and start watching
+> 6. **Verify** — on a real error you get a **cited** root cause; raise autonomy to open a fix PR
+>
+> **No application code changes. No OpenTelemetry/SDKs to add. No signup, no ingest token.** It's
+> self-hosted and read-only — nothing leaves your box except to the engine you choose.
+
+</details>
+
+Prefer to do it by hand? Continue below. (Onboarding pattern inspired by
+[clicky](https://github.com/farzaa/clicky) and [superlog](https://superlog.sh) — but VigilAI needs
+**zero code changes** and **no account**: it reads the logs you already have.)
+
 ## Setup
 
 **Build** (checkout `vigil` and `vigil-engine` side by side):
