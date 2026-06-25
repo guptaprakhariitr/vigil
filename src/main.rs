@@ -68,6 +68,25 @@ enum Cmd {
         #[arg(long, default_value_t = 0.7)]
         min_confidence: f64,
     },
+    /// Batch pass: investigate EVERY open escalate-routed incident once (not just
+    /// the dominant one). Catches multiple concurrent incidents in a single run.
+    Sweep {
+        path: Option<PathBuf>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value = "claude-cli")]
+        engine: String,
+        #[arg(long)]
+        no_engine: bool,
+        #[arg(long, default_value = "notify")]
+        autonomy: String,
+        #[arg(long, default_value_t = 0.7)]
+        min_confidence: f64,
+    },
     /// Show daemon health: events seen, open incidents, footprint.
     Status {
         #[arg(long, default_value = "vigil.db")]
@@ -219,6 +238,67 @@ fn make_engine(no_engine: bool, engine: &str) -> Box<dyn EngineAdapter> {
     }
 }
 
+/// One engine escalation for a focused incident (`incident.top` = the cluster to
+/// investigate): bundle → investigate → validate the patch → autonomy gate → act.
+/// Shared by `up` (dominant incident per tick) and `sweep` (every open one).
+#[allow(clippy::too_many_arguments)]
+fn escalate(
+    store: &Store,
+    adapter: &dyn EngineAdapter,
+    project: &str,
+    repo: Option<&std::path::Path>,
+    autonomy: vigil_engine::policy::Autonomy,
+    min_confidence: f64,
+    incident: &correlate::Incident,
+    id: i64,
+) -> Result<()> {
+    use vigil_engine::policy::{decide, Act};
+    let Some(top) = incident.top.clone() else { return Ok(()) };
+    let repo_str = repo.map(|p| p.display().to_string());
+    let seed = bundle::build(incident, project, repo_str.as_deref());
+    store.record_usage(project, "investigate", est_tokens(&seed))?;
+    match adapter.investigate(&seed) {
+        Ok(f) if !f.abstain => {
+            let short: String = f.cause.chars().take(160).collect();
+            println!("   ↳ cause: {} (conf {:.2})", short, f.confidence);
+            store.record_finding(id, &f.cause, f.confidence, &f.citations.join(","))?;
+            store.audit(project, id, "investigate", "finding", &short)?;
+            let base = incident.recent_change.as_deref().and_then(sha_of);
+            let mut validated = false;
+            if let (Some(patch), Some(r)) = (f.patch.as_ref(), repo) {
+                match validate::validate_patch(r, base, patch, None) {
+                    Ok(v) => {
+                        println!("   ↳ patch: {} [{}]", v.summary(), v.files.join(", "));
+                        store.audit(project, id, "validate", if v.ok() { "ok" } else { "reject" }, &v.summary())?;
+                        validated = v.ok();
+                    }
+                    Err(e) => eprintln!("   ! validation error: {e}"),
+                }
+            }
+            let d = decide(autonomy, validated, f.confidence, min_confidence);
+            if let Act::OpenPr { auto_merge } = d.act {
+                if let (Some(patch), Some(r), Some(b)) = (f.patch.as_ref(), repo, base) {
+                    let branch = format!("vigil/fix-{}", &top.template_id[..top.template_id.len().min(8)]);
+                    let title = format!("fix: {}", short.replace('\n', " "));
+                    match vigil_engine::act::open_pr(r, b, &branch, patch, &title, &f.cause, auto_merge) {
+                        Ok(p) => {
+                            let where_ = p.pr_url.clone().unwrap_or_else(|| format!("branch {}", p.branch));
+                            println!("   ↳ proposed: {} — {}", where_, p.details.join("; "));
+                            store.audit(project, id, "act", "open_pr", &where_)?;
+                        }
+                        Err(e) => eprintln!("   ! propose failed: {e}"),
+                    }
+                }
+            } else {
+                eprintln!("   ↳ gate: {} ({})", action_name(&d.act), d.reason);
+            }
+        }
+        Ok(f) => println!("   ↳ engine abstained: {}", f.reason.unwrap_or_default()),
+        Err(e) => eprintln!("   ! engine error: {e}"),
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Investigate { path, repo, project, engine, no_engine, out, show_bundle } => {
@@ -311,51 +391,7 @@ fn main() -> Result<()> {
                                 "🔔 {} {} · NEW incident ×{} · blast {} — {}",
                                 sev, project, count, blast, top.template
                             );
-                            // novel + escalate → spend one engine call
-                            let repo_str = repo.as_ref().map(|p| p.display().to_string());
-                            let seed = bundle::build(&incident, &project, repo_str.as_deref());
-                            store.record_usage(&project, "investigate", est_tokens(&seed))?;
-                            match adapter.investigate(&seed) {
-                                Ok(f) if !f.abstain => {
-                                    let short: String = f.cause.chars().take(160).collect();
-                                    println!("   ↳ cause: {} (conf {:.2})", short, f.confidence);
-                                    store.record_finding(id, &f.cause, f.confidence, &f.citations.join(","))?;
-                                    store.audit(&project, id, "investigate", "finding", &short)?;
-                                    // do-no-harm: validate any proposed patch before trusting it.
-                                    let base = incident.recent_change.as_deref().and_then(sha_of);
-                                    let mut validated = false;
-                                    if let (Some(patch), Some(r)) = (f.patch.as_ref(), repo.as_ref()) {
-                                        match validate::validate_patch(r, base, patch, None) {
-                                            Ok(v) => {
-                                                println!("   ↳ patch: {} [{}]", v.summary(), v.files.join(", "));
-                                                store.audit(&project, id, "validate", if v.ok() { "ok" } else { "reject" }, &v.summary())?;
-                                                validated = v.ok();
-                                            }
-                                            Err(e) => eprintln!("   ! validation error: {e}"),
-                                        }
-                                    }
-                                    // autonomy gate → maybe open a PR with the validated fix.
-                                    let d = vigil_engine::policy::decide(autonomy, validated, f.confidence, min_confidence);
-                                    if let vigil_engine::policy::Act::OpenPr { auto_merge } = d.act {
-                                        if let (Some(patch), Some(r), Some(b)) = (f.patch.as_ref(), repo.as_ref(), base) {
-                                            let branch = format!("vigil/fix-{}", &top.template_id[..top.template_id.len().min(8)]);
-                                            let title = format!("fix: {}", short.replace('\n', " "));
-                                            match vigil_engine::act::open_pr(r, b, &branch, patch, &title, &f.cause, auto_merge) {
-                                                Ok(p) => {
-                                                    let where_ = p.pr_url.clone().unwrap_or_else(|| format!("branch {}", p.branch));
-                                                    println!("   ↳ proposed: {} — {}", where_, p.details.join("; "));
-                                                    store.audit(&project, id, "act", "open_pr", &where_)?;
-                                                }
-                                                Err(e) => eprintln!("   ! propose failed: {e}"),
-                                            }
-                                        }
-                                    } else {
-                                        eprintln!("   ↳ gate: {} ({})", action_name(&d.act), d.reason);
-                                    }
-                                }
-                                Ok(f) => println!("   ↳ engine abstained: {}", f.reason.unwrap_or_default()),
-                                Err(e) => eprintln!("   ! engine error: {e}"),
-                            }
+                            escalate(&store, adapter.as_ref(), &project, repo.as_deref(), autonomy, min_confidence, &incident, id)?;
                         } else if is_new {
                             println!("👁  {} {} · watching ×{} blast {} ({}) — {}", sev, project, count, blast, why, top.template);
                         } else {
@@ -373,6 +409,57 @@ fn main() -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_secs(interval));
             }
+        }
+
+        Cmd::Sweep { path, repo, project, db, engine, no_engine, autonomy, min_confidence } => {
+            let mut store = Store::open(&db)?;
+            let reg = store.get_project(&project)?;
+            let (path, repo, engine, autonomy, min_confidence) = match (path, &reg) {
+                (Some(p), _) => (p, repo, engine, autonomy, min_confidence),
+                (None, Some(pr)) => (
+                    PathBuf::from(&pr.log_path),
+                    pr.repo.clone().map(PathBuf::from),
+                    pr.engine.clone(),
+                    pr.autonomy.clone(),
+                    pr.min_confidence,
+                ),
+                (None, None) => {
+                    return Err(anyhow::anyhow!("no path and project '{project}' not registered"))
+                }
+            };
+            let adapter = make_engine(no_engine, &engine);
+            let policy = store.load_policy(&project)?;
+            let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
+            let events = ingest::ingest_path(&path, &project)?;
+            store.insert_events(&project, &events)?;
+            let incident = correlate::correlate(&events, repo.as_deref());
+            eprintln!(
+                "▶ vigil sweep · project={} · {} events · {} templates · engine={} · autonomy={}",
+                project, events.len(), incident.clusters.len(), adapter.name(), autonomy.as_str()
+            );
+            let mut investigated = 0;
+            let mut skipped = 0;
+            for c in &incident.clusters {
+                let blast = detect::blast_radius(&events, &c.template_id);
+                let sev = detect::severity(c.count, blast);
+                let cand = Candidate { template_id: &c.template_id, signature: &c.template, count: c.count, blast };
+                let (route, _why) = triage::route(&policy, &cand);
+                if route != Route::Escalate {
+                    continue;
+                }
+                let (_is_new, id) =
+                    store.upsert_incident(&project, &c.template_id, &c.template, sev, blast as i64, c.count as i64)?;
+                if store.is_resolved(id)? || store.finding_count(id)? > 0 {
+                    skipped += 1;
+                    continue; // already known / already investigated — don't re-spend
+                }
+                println!("🔎 {} {} · ×{} blast {} — {}", sev, project, c.count, blast, c.template);
+                let mut focused = incident.clone();
+                focused.top = Some(c.clone());
+                escalate(&store, adapter.as_ref(), &project, repo.as_deref(), autonomy, min_confidence, &focused, id)?;
+                investigated += 1;
+            }
+            println!("· sweep done — {investigated} investigated, {skipped} already known");
         }
 
         Cmd::Status { db } => {
