@@ -87,6 +87,41 @@ enum Cmd {
         #[arg(long, default_value_t = 0.7)]
         min_confidence: f64,
     },
+    /// Portfolio scheduler: watch ALL registered projects in a fair round-robin
+    /// under one global token budget. Skips paused projects; sheds its own load
+    /// (detection-only) when it exceeds the resource budget.
+    Run {
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value_t = 15)]
+        interval: u64,
+        #[arg(long)]
+        once: bool,
+        #[arg(long, default_value_t = 0)]
+        max_iterations: u64,
+        /// Global engine token budget for this run (0 = unlimited).
+        #[arg(long, default_value_t = 0)]
+        token_budget: i64,
+        /// Resource budget: detection-only while own RSS exceeds this MB (0 = off).
+        #[arg(long, default_value_t = 0)]
+        max_rss_mb: u64,
+        #[arg(long)]
+        no_engine: bool,
+    },
+    /// Pause the scheduler for a project (or `*` = all). `up`/`run` skip it.
+    Pause {
+        #[arg(default_value = "*")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+    /// Resume a paused project (or `*` = all).
+    Resume {
+        #[arg(default_value = "*")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
     /// Show daemon health: events seen, open incidents, footprint.
     Status {
         #[arg(long, default_value = "vigil.db")]
@@ -274,12 +309,13 @@ fn escalate(
     min_confidence: f64,
     incident: &correlate::Incident,
     id: i64,
-) -> Result<()> {
+) -> Result<i64> {
     use vigil_engine::policy::{decide, Act};
-    let Some(top) = incident.top.clone() else { return Ok(()) };
+    let Some(top) = incident.top.clone() else { return Ok(0) };
     let repo_str = repo.map(|p| p.display().to_string());
     let seed = bundle::build(incident, project, repo_str.as_deref());
-    store.record_usage(project, "investigate", est_tokens(&seed))?;
+    let est = est_tokens(&seed);
+    store.record_usage(project, "investigate", est)?;
     match adapter.investigate(&seed) {
         Ok(f) if !f.abstain => {
             let short: String = f.cause.chars().take(160).collect();
@@ -318,6 +354,90 @@ fn escalate(
         }
         Ok(f) => println!("   ↳ engine abstained: {}", f.reason.unwrap_or_default()),
         Err(e) => eprintln!("   ! engine error: {e}"),
+    }
+    Ok(est)
+}
+
+/// Own resident-set size in MB (Linux/container via /proc; None elsewhere).
+/// Used for self-metering and the resource budget — VigilAI sheds its own load.
+fn own_rss_mb() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
+}
+
+/// One detection pass for one project: ingest new lines → detect → triage →
+/// (budget-permitting) escalate. Shared by `up` (one project, looped) and `run`
+/// (the portfolio scheduler). `budget` is the remaining global token allowance;
+/// when it hits zero, detection continues but no engine call is spent.
+#[allow(clippy::too_many_arguments)]
+fn process_project_once(
+    store: &mut Store,
+    project: &str,
+    path: &std::path::Path,
+    repo: Option<&std::path::Path>,
+    adapter: &dyn EngineAdapter,
+    autonomy: vigil_engine::policy::Autonomy,
+    min_confidence: f64,
+    policy: &[vigil_engine::triage::PolicyRule],
+    budget: &mut Option<i64>,
+) -> Result<()> {
+    let path_key = path.display().to_string();
+    let mut processed = store.get_cursor(project, &path_key)?;
+    let events = ingest::ingest_path(path, project)?;
+    if events.len() < processed {
+        processed = 0; // rotation
+    }
+    if events.len() <= processed {
+        return Ok(()); // nothing new
+    }
+    let fresh = &events[processed..];
+    store.insert_events(project, fresh)?;
+    let n = fresh.len();
+    store.set_cursor(project, &path_key, events.len())?;
+
+    let incident = correlate::correlate(&events, repo);
+    let Some(top) = incident.top.clone() else {
+        eprintln!("· [{project}] +{n} events · no incident (healthy)");
+        return Ok(());
+    };
+    let count = top.count as i64;
+    let blast = detect::blast_radius(&events, &top.template_id);
+    let sev = detect::severity(top.count, blast);
+    let cand = Candidate { template_id: &top.template_id, signature: &top.template, count: top.count, blast };
+    let (route, why) = triage::route(policy, &cand);
+    let (is_new, id) = store.upsert_incident(project, &top.template_id, &top.template, sev, blast as i64, count)?;
+
+    if route == Route::Mute {
+        eprintln!("· [{project}] muted by policy ({why})");
+    } else if !is_new && store.is_resolved(id)? {
+        eprintln!("· [{project}] known/resolved ×{count} — suppressed");
+    } else if is_new
+        && route == Route::Escalate
+        && triage::nearest(&top.template, &store.resolved_signatures(project)?, 0.9).is_some()
+    {
+        store.set_incident_status(id, "resolved")?;
+        eprintln!("· [{project}] near-duplicate of a resolved incident — suppressed");
+    } else if is_new && route == Route::Escalate {
+        if matches!(budget, Some(b) if *b <= 0) {
+            println!("🔔 {sev} {project} · NEW ×{count} blast {blast} — {} (engine budget exhausted — detection only)", top.template);
+            store.audit(project, id, "schedule", "budget_skip", &top.template)?;
+        } else {
+            println!("🔔 {sev} {project} · NEW incident ×{count} · blast {blast} — {}", top.template);
+            let spent = escalate(store, adapter, project, repo, autonomy, min_confidence, &incident, id)?;
+            if let Some(b) = budget {
+                *b -= spent;
+            }
+        }
+    } else if is_new {
+        println!("👁  {sev} {project} · watching ×{count} blast {blast} ({why})");
+    } else {
+        eprintln!("· [{project}] recurring ×{count} ({sev}, {})", route.as_str());
     }
     Ok(())
 }
@@ -382,64 +502,11 @@ fn main() -> Result<()> {
                 "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules · autonomy={}\n  (read-only · Ctrl-C to stop)",
                 project, path.display(), adapter.name(), db, policy.len(), autonomy.as_str()
             );
-            // Resume from the persisted offset so a restart doesn't re-ingest.
-            let path_key = path.display().to_string();
-            let mut processed = store.get_cursor(&project, &path_key)?;
             let mut iter = 0u64;
+            let mut budget: Option<i64> = None; // single-project up: no global cap
             loop {
                 iter += 1;
-                let events = ingest::ingest_path(&path, &project)?;
-                if events.len() < processed {
-                    processed = 0; // file rotated/truncated — start over
-                }
-                if events.len() > processed {
-                    let fresh = &events[processed..];
-                    store.insert_events(&project, fresh)?;
-                    let n = fresh.len();
-                    processed = events.len();
-                    store.set_cursor(&project, &path_key, processed)?;
-
-                    // detect: dominant error signature over everything seen
-                    let incident = correlate::correlate(&events, repo.as_deref());
-                    if let Some(top) = incident.top.clone() {
-                        let count = top.count as i64;
-                        let blast = detect::blast_radius(&events, &top.template_id);
-                        let sev = detect::severity(top.count, blast);
-                        // Tier-1: decide route before spending anything (sub-ms, 0 tokens).
-                        let cand = Candidate { template_id: &top.template_id, signature: &top.template, count: top.count, blast };
-                        let (route, why) = triage::route(&policy, &cand);
-                        let (is_new, id) =
-                            store.upsert_incident(&project, &top.template_id, &top.template, sev, blast as i64, count)?;
-                        if route == Route::Mute {
-                            eprintln!("· +{} events · muted by policy ({}) — {}", n, why, top.template);
-                        } else if !is_new && store.is_resolved(id)? {
-                            // verified-recurring: a human already accepted a fix for this — don't re-spend.
-                            eprintln!("· +{} events · known/resolved incident ×{} — suppressed (no engine call)", n, count);
-                        } else if is_new
-                            && route == Route::Escalate
-                            && triage::nearest(&top.template, &store.resolved_signatures(&project)?, 0.9).is_some()
-                        {
-                            // lexical novelty: a near-identical signature was already fixed → not novel.
-                            store.set_incident_status(id, "resolved")?;
-                            eprintln!("· +{} events · near-duplicate of a resolved incident — suppressed (no engine call)", n);
-                        } else if is_new && route == Route::Escalate {
-                            println!(
-                                "🔔 {} {} · NEW incident ×{} · blast {} — {}",
-                                sev, project, count, blast, top.template
-                            );
-                            escalate(&store, adapter.as_ref(), &project, repo.as_deref(), autonomy, min_confidence, &incident, id)?;
-                        } else if is_new {
-                            println!("👁  {} {} · watching ×{} blast {} ({}) — {}", sev, project, count, blast, why, top.template);
-                        } else {
-                            eprintln!("· +{} events · recurring incident ×{} ({}, {})", n, count, sev, route.as_str());
-                        }
-                    } else {
-                        eprintln!("· +{} events · no incident (healthy)", n);
-                    }
-                } else {
-                    eprintln!("· no new logs");
-                }
-
+                process_project_once(&mut store, &project, &path, repo.as_deref(), adapter.as_ref(), autonomy, min_confidence, &policy, &mut budget)?;
                 if once || (max_iterations != 0 && iter >= max_iterations) {
                     break;
                 }
@@ -498,6 +565,61 @@ fn main() -> Result<()> {
             println!("· sweep done — {investigated} investigated, {skipped} already known");
         }
 
+        Cmd::Run { db, interval, once, max_iterations, token_budget, max_rss_mb, no_engine } => {
+            let mut store = Store::open(&db)?;
+            if store.list_projects()?.is_empty() {
+                return Err(anyhow::anyhow!("no projects registered — use `vigil project add <name> <logs>`"));
+            }
+            let mut budget: Option<i64> = if token_budget > 0 { Some(token_budget) } else { None };
+            eprintln!(
+                "▶ vigil run · {} project(s) · token-budget {} · interval {}s · rss-cap {}\n  (read-only · Ctrl-C to stop)",
+                store.list_projects()?.len(),
+                if token_budget > 0 { token_budget.to_string() } else { "∞".into() },
+                interval,
+                if max_rss_mb > 0 { format!("{max_rss_mb}MB") } else { "off".into() },
+            );
+            let mut iter = 0u64;
+            loop {
+                iter += 1;
+                for p in store.list_projects()? {
+                    if store.is_paused(&p.name)? {
+                        eprintln!("· [{}] paused — skipped", p.name);
+                        continue;
+                    }
+                    // resource budget: shed our own load (detection-only) when over RSS.
+                    let rss_block = max_rss_mb > 0 && own_rss_mb().map(|r| r > max_rss_mb).unwrap_or(false);
+                    if rss_block {
+                        eprintln!("· over RSS budget ({}MB) — detection only this round", max_rss_mb);
+                    }
+                    let mut tick_budget = if rss_block { Some(0) } else { budget };
+                    let adapter = make_engine(no_engine, &p.engine)?;
+                    let policy = store.load_policy(&p.name)?;
+                    let autonomy = vigil_engine::policy::Autonomy::parse(&p.autonomy);
+                    let path = PathBuf::from(&p.log_path);
+                    let repo = p.repo.clone().map(PathBuf::from);
+                    process_project_once(&mut store, &p.name, &path, repo.as_deref(), adapter.as_ref(), autonomy, p.min_confidence, &policy, &mut tick_budget)?;
+                    if !rss_block {
+                        budget = tick_budget; // persist real spend (RSS backoff is temporary)
+                    }
+                }
+                if once || (max_iterations != 0 && iter >= max_iterations) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(interval));
+            }
+        }
+
+        Cmd::Pause { project, db } => {
+            let store = Store::open(&db)?;
+            store.set_paused(&project, true)?;
+            println!("⏸  paused {}", if project == "*" { "all projects".into() } else { project });
+        }
+        Cmd::Resume { project, db } => {
+            let store = Store::open(&db)?;
+            store.set_paused(&project, false)?;
+            println!("▶ resumed {}", if project == "*" { "all projects".into() } else { project });
+        }
+
         Cmd::Status { db } => {
             let store = Store::open(&db)?;
             let (events, open) = store.counts()?;
@@ -508,6 +630,13 @@ fn main() -> Result<()> {
             println!("  incidents : {} open / {} total", open, incs.len());
             let footprint = std::fs::metadata(&db).map(|m| m.len()).unwrap_or(0);
             println!("  footprint : {} KB on disk (read-only data plane)", footprint / 1024);
+            match own_rss_mb() {
+                Some(rss) => println!("  self      : {} MB RSS (self-metered)", rss),
+                None => println!("  self      : RSS n/a (Linux/container only)"),
+            }
+            if store.get_setting("paused_all")?.as_deref() == Some("1") {
+                println!("  scheduler : ⏸ PAUSED (all)");
+            }
             if let Some(t) = incs.iter().find(|i| i.severity == "SEV2" || i.severity == "SEV1") {
                 println!("  ! top     : {} {}", t.severity, t.signature);
             }
