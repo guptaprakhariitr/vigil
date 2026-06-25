@@ -33,13 +33,19 @@ Prefer to do it by hand? Continue below. (Onboarding pattern inspired by
 [clicky](https://github.com/farzaa/clicky) and [superlog](https://superlog.sh) — but VigilAI needs
 **zero code changes** and **no account**: it reads the logs you already have.)
 
-## Setup
+## Install
 
-**Build** (checkout `vigil` and `vigil-engine` side by side):
+**Download the binary** for your platform from [Releases](https://github.com/guptaprakhariitr/vigil/releases)
+(the deterministic engine is bundled in — nothing else to fetch):
 ```bash
-cargo build --release        # binary at target/release/vigil
+# macOS (Apple silicon) example — see Releases for your platform/asset name
+curl -fsSL -o vigil https://github.com/guptaprakhariitr/vigil/releases/latest/download/vigil-aarch64-apple-darwin
+chmod +x vigil && ./vigil --version
 ```
 **Or run anywhere** with Docker / Compose / Helm — see [docs/REFERENCE.md](docs/REFERENCE.md#deploy).
+
+> Building from source needs the private `vigil-engine` crate beside this repo, so it's for
+> maintainers; everyone else uses the released binary or container above.
 
 ## Try it in 60 seconds
 

@@ -80,6 +80,27 @@ fn preview(s: &str, n: usize) -> String {
 }
 fn sev_pill(s: &str) -> &'static str { match s { "SEV1" | "SEV2" => "red", "SEV3" => "amber", _ => "grey" } }
 fn route_pill(r: &str) -> &'static str { match r { "escalate" => "red", "watch" => "amber", _ => "grey" } }
+
+/// "active for 2d 4h" from the stored monitoring-since epoch.
+fn uptime_str(store: &Store) -> String {
+    let Ok(Some(since)) = store.monitoring_since() else { return "—".into() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(since);
+    let s = (now - since).max(0);
+    let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
+    if d > 0 { format!("{d}d {h}h") } else if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
+}
+
+const PER_PAGE: usize = 50;
+fn page_of(query: &str) -> usize { form_get(query, "page").and_then(|p| p.parse().ok()).unwrap_or(1).max(1) }
+/// Prev/Next nav for a paginated list. `base` already includes any leading `?`-less path.
+fn pager(base: &str, page: usize, total: usize) -> String {
+    let pages = total.div_ceil(PER_PAGE).max(1);
+    if pages <= 1 { return String::new(); }
+    let sep = if base.contains('?') { "&" } else { "?" };
+    let prev = if page > 1 { format!("<a class=back href=\"{base}{sep}page={}\">← prev</a>", page - 1) } else { String::new() };
+    let next = if page < pages { format!("<a class=back href=\"{base}{sep}page={}\">next →</a>", page + 1) } else { String::new() };
+    format!("<div class=actions style=\"margin-top:12px\"><span class=sub>page {page} of {pages} · {total} total</span> {prev} {next}</div>")
+}
 fn urlenc(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c.to_string() } else { format!("%{:02X}", c as u32) }).collect()
 }
@@ -228,6 +249,7 @@ const SPRITE: &str = r##"<svg width="0" height="0" style="position:absolute" ari
 <symbol id="i-pat" viewBox="0 0 24 24"><circle cx="7" cy="6" r="2"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="8" r="2"/><path d="M7 8v8"/><path d="M17 10c0 4-10 1-10 6"/></symbol>
 <symbol id="i-ask" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.7"/><path d="M12 16h.01"/></symbol>
 <symbol id="i-set" viewBox="0 0 24 24"><path d="M4 8h9"/><circle cx="15" cy="8" r="2"/><path d="M17 8h3"/><path d="M4 16h3"/><circle cx="9" cy="16" r="2"/><path d="M11 16h9"/></symbol>
+<symbol id="i-guide" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.4 2.3c-.6.3-1 .9-1 1.7"/><path d="M12 16h.01"/></symbol>
 </svg>"##;
 
 fn rail(active: &str) -> String {
@@ -236,7 +258,7 @@ fn rail(active: &str) -> String {
         format!("<a class=\"rico{on}\" href=\"{href}\"><svg><use href=\"#{ic}\"/></svg>{label}</a>")
     };
     format!(
-        "<nav class=rail>{}{}{}{}{}{}{}</nav>",
+        "<nav class=rail>{}{}{}{}{}{}{}{}</nav>",
         item("i-proj", "Projects", "/", "proj"),
         item("i-inc", "Incidents", "/incidents", "inc"),
         item("i-src", "Sources", "/sources", "src"),
@@ -244,6 +266,7 @@ fn rail(active: &str) -> String {
         item("i-pat", "Patches", "/patches", "pat"),
         item("i-ask", "Ask", "/ask", "ask"),
         item("i-set", "Settings", "/settings", "set"),
+        item("i-guide", "Guide", "/guide", "guide"),
     )
 }
 
@@ -342,10 +365,11 @@ pub fn route(store: &Store, db: &str, default_project: &str, method: &str, path:
                 "blast": i.blast_radius, "has_finding": i.has_finding, "signature": i.signature})).collect();
             Resp { status: 200, ctype: "application/json".into(), body: serde_json::to_string(&arr)?, location: None }
         }
-        ["incidents"] => html(page_all_incidents(store)?),
+        ["incidents"] => html(page_all_incidents(store, page_of(query))?),
         ["sources"] => html(page_all_sources(store)?),
-        ["explore"] => html(page_all_explore(store)?),
-        ["patches"] => html(page_all_patches(store)?),
+        ["explore"] => html(page_all_explore(store, page_of(query))?),
+        ["patches"] => html(page_all_patches(store, page_of(query))?),
+        ["guide"] => html(page_guide(store)?),
         ["ask"] => {
             let q = form_get(query, "q").filter(|s| !s.is_empty());
             let proj = form_get(query, "project").filter(|s| !s.is_empty())
@@ -387,7 +411,7 @@ pub fn route(store: &Store, db: &str, default_project: &str, method: &str, path:
         }
         ["settings"] => html(page_settings_sys(store)?),
         ["p", proj] => html(page_overview(store, proj)?),
-        ["p", proj, "incidents"] => html(page_incidents(store, proj)?),
+        ["p", proj, "incidents"] => html(page_incidents(store, proj, page_of(query))?),
         ["p", proj, "incident", id] => {
             let tab = match form_get(query, "tab").as_deref() {
                 Some("evidence") => "evidence",
@@ -397,8 +421,8 @@ pub fn route(store: &Store, db: &str, default_project: &str, method: &str, path:
             html(page_incident(store, proj, id.parse().unwrap_or(0), tab)?)
         }
         ["p", proj, "sources"] => html(page_sources(store, proj)?),
-        ["p", proj, "explore"] => html(page_explore(store, proj)?),
-        ["p", proj, "rules"] => html(page_rules(store, proj)?),
+        ["p", proj, "explore"] => html(page_explore(store, proj, page_of(query))?),
+        ["p", proj, "rules"] => html(page_rules(store, proj, page_of(query))?),
         ["p", proj, "config"] => html(page_config(store, proj)?),
         _ => html(shell("", "not found", "not found", "<h1>Not found</h1><p class=sub><a href=/>← portfolio</a></p>")),
     };
@@ -535,8 +559,8 @@ fn page_portfolio(store: &Store) -> Result<String> {
     let body = format!(
         "<h1>Portfolio</h1><p class=sub>every system VigilAI watches · one control plane, isolated projects</p>\
 <div class=stats><div class=stat><b>{}</b><span>projects</span></div><div class=stat><b>{events}</b><span>events</span></div>\
-<div class=stat><b>{open}</b><span>open incidents</span></div></div><div class=pgrid>{cards}</div>{addform}",
-        projects.len()
+<div class=stat><b>{open}</b><span>open incidents</span></div><div class=stat><b>{}</b><span>active for</span></div></div><div class=pgrid>{cards}</div>{addform}",
+        projects.len(), uptime_str(store)
     );
     Ok(shell("proj", "portfolio", "Portfolio", &body))
 }
@@ -562,13 +586,15 @@ fn incidents_table(_store: &Store, rows_src: &[(String, vigil_engine::store::Inc
     )
 }
 
-fn page_all_incidents(store: &Store) -> Result<String> {
+fn page_all_incidents(store: &Store, page: usize) -> Result<String> {
     let mut all = Vec::new();
     for pr in store.list_projects()? {
         for i in store.list_incidents_for(&pr.name)? { all.push((pr.name.clone(), i)); }
     }
     all.sort_by(|a, b| sev_rank(&a.1.severity).cmp(&sev_rank(&b.1.severity)).then(b.1.count.cmp(&a.1.count)));
     let open = all.iter().filter(|(_, i)| i.status == "open").count();
+    let total = all.len();
+    let pagerow: Vec<_> = all.iter().skip((page - 1) * PER_PAGE).take(PER_PAGE).cloned().collect();
     // per-project cards (like the portfolio) — click → that project's incidents
     let mut cards = String::new();
     for pr in store.list_projects()? {
@@ -582,8 +608,8 @@ fn page_all_incidents(store: &Store) -> Result<String> {
     let body = format!(
         "<h1>Incidents · all projects</h1><p class=sub>open incidents grouped by project — click a project, or a row below to investigate</p>\
 <div class=stats><div class=stat><b>{open}</b><span>open</span></div><div class=stat><b>{}</b><span>total</span></div></div>\
-<div class=pgrid style=\"margin-bottom:18px\">{cards}</div><h2>All incidents</h2>{}",
-        all.len(), incidents_table(store, &all, true)
+<div class=pgrid style=\"margin-bottom:18px\">{cards}</div><h2>All incidents</h2>{}{}",
+        total, incidents_table(store, &pagerow, true), pager("/incidents", page, total)
     );
     Ok(shell("inc", "incidents · all", "Incidents", &body))
 }
@@ -613,19 +639,24 @@ fn page_all_sources(store: &Store) -> Result<String> {
     Ok(shell("src", "sources · all", "Sources", &body))
 }
 
-fn page_all_explore(store: &Store) -> Result<String> {
-    let mut rows = String::new();
+fn page_all_explore(store: &Store, page: usize) -> Result<String> {
+    let mut all = Vec::new();
     for pr in store.list_projects()? {
-        for r in store.load_policy(&pr.name)?.into_iter().take(20) {
-            rows.push_str(&format!("<tr><td class=mono>{}</td><td><span class=\"pill {}\">{}</span></td><td>{}</td></tr>",
-                esc(&pr.name), route_pill(r.route.as_str()), r.route.as_str(), tpl_details(&r.signature)));
-        }
+        for r in store.load_policy(&pr.name)? { all.push((pr.name.clone(), r)); }
     }
-    if rows.is_empty() { rows.push_str("<tr><td colspan=3 class=empty>No templates yet.</td></tr>"); }
+    let total = all.len();
+    let mut rows = String::new();
+    for (pname, r) in all.iter().skip((page - 1) * PER_PAGE).take(PER_PAGE) {
+        let why = if r.reason.is_empty() { "<span class=sub>—</span>".to_string() } else { format!("<span class=sub>{}</span>", esc(&r.reason)) };
+        rows.push_str(&format!("<tr><td class=mono>{}</td><td><span class=\"pill {}\">{}</span></td><td>{}</td><td>{}</td></tr>",
+            esc(pname), route_pill(r.route.as_str()), r.route.as_str(), tpl_details(&r.signature), why));
+    }
+    if all.is_empty() { rows.push_str("<tr><td colspan=4 class=empty>No templates yet.</td></tr>"); }
     let body = format!(
-        "<h1>Explore · all projects</h1><p class=sub>mined templates &amp; routes across the portfolio · ask in NL on <a href=/ask>Ask</a></p>\
-<div class=tablewrap><table><colgroup><col class=md><col class=sm><col class=sigcol></colgroup>\
-<tr><th>Project</th><th>Route</th><th>Template</th></tr>{rows}</table></div>"
+        "<h1>Explore · all projects</h1><p class=sub>mined templates (masked log patterns) &amp; their routes across the portfolio · ask in NL on <a href=/ask>Ask</a></p>\
+<div class=tablewrap><table><colgroup><col class=md><col class=sm><col class=sigcol><col class=lg></colgroup>\
+<tr><th>Project</th><th>Route</th><th>Template (click to expand)</th><th>Why</th></tr>{rows}</table></div>{}",
+        pager("/explore", page, total)
     );
     Ok(shell("exp", "explore · all", "Explore", &body))
 }
@@ -655,7 +686,7 @@ fn patches_html(store: &Store, project: &str, show_project: bool) -> Result<(usi
     Ok((n, out))
 }
 
-fn page_all_patches(store: &Store) -> Result<String> {
+fn page_all_patches(store: &Store, _page: usize) -> Result<String> {
     let (n, out) = patches_html(store, "", true)?;
     let body = format!(
         "<h1>Patches · all projects</h1><p class=sub>validated fixes VigilAI proposed — review before merge</p>{}",
@@ -732,6 +763,51 @@ fn page_settings_sys(store: &Store) -> Result<String> {
     Ok(shell("set", "settings · system", "Settings", &body))
 }
 
+fn page_guide(store: &Store) -> Result<String> {
+    let g = |term: &str, def: &str| format!("<div class=setrow><b style=\"min-width:150px;display:inline-block\">{term}</b><span class=v style=\"flex:1;color:var(--text)\">{def}</span></div>");
+    let body = format!(
+        "<h1>Guide</h1><p class=sub>the minimum you need to know to run VigilAI · active for {}</p>\
+<h2>What it is</h2><div class=card><p style=\"margin:0;line-height:1.7\">VigilAI watches your app's logs, groups the noise into <b>incidents</b>, and — only for novel, real ones — \
+spends one engine call to produce a <b>cited root cause</b> (and, if you allow it, a validated fix PR). It runs on <b>your</b> box, on <b>your</b> engine, at <b>your</b> autonomy. \
+It's read-only and never deploys.</p></div>\
+<h2>The mental model</h2><div class=card><ol style=\"margin:0;line-height:1.8;padding-left:18px\">\
+<li>A <b>project</b> = one system (a compose/app). Its containers are its <b>sources</b>. Add them all to the one project.</li>\
+<li>VigilAI mines repeating log lines into <b>templates</b> (patterns), groups them into <b>incidents</b>, and a deterministic <b>Tier-1 policy</b> routes each: <b>mute</b> / <b>watch</b> / <b>escalate</b> — at zero token cost.</li>\
+<li>Only an <i>escalated, novel</i> incident hits the engine → a cited <b>finding</b>. The <b>autonomy dial</b> decides what happens with a validated fix.</li>\
+<li>You teach it with <b>accept/reject</b>; periodic <b>warm</b>/<b>calibrate</b> let the engine refine the policy (eval-gated).</li></ol></div>\
+<h2>What you actually do</h2><div class=card><ol style=\"margin:0;line-height:1.8;padding-left:18px\">\
+<li><b>Add a project</b> (Portfolio → + Add project) and its sources.</li>\
+<li><b>Pick the engine &amp; autonomy</b> in the project's Config (start at <code>notify</code>).</li>\
+<li><b>Warm</b> the policy once (project Overview → ⚙ Warm policy), skim Rules.</li>\
+<li>Let it run. Review incidents; <b>Accept</b> real ones, <b>Reject</b> noise. <b>Ask</b> questions in English.</li></ol></div>\
+<h2>The autonomy dial</h2><div class=card>{}{}{}{}{}</div>\
+<h2>Glossary</h2><div class=card>{}{}{}{}{}{}{}{}{}{}{}{}</div>\
+<h2>Guarantees</h2><div class=card>{}{}{}</div>",
+        uptime_str(store),
+        g("notify", "tell a human only (default, safest)"),
+        g("report", "write a cited RCA; no code action"),
+        g("propose", "open a PR with the validated fix for review"),
+        g("merge", "open the PR + auto-merge — your CI is the gate"),
+        g("release", "hand to your CD; VigilAI never deploys directly"),
+        g("Project", "one logical system (compose/repo) — the isolation boundary"),
+        g("Source", "one log stream (a container/service); a project has many"),
+        g("Template", "a recurring log line with variable bits masked (numbers→&lt;n&gt;, ids/paths→&lt;str&gt;) — one pattern per group of similar lines"),
+        g("Incident", "a correlated group of events with a dominant signature, severity &amp; blast radius"),
+        g("Signature", "the human-readable template of an incident's dominant error"),
+        g("Route", "the Tier-1 decision per template: mute · watch · escalate (with a reason)"),
+        g("Severity / Blast", "how loud (count) and how wide (services/tenants) it is"),
+        g("Finding", "the engine's result: cause, confidence (0–1), citations, optional patch"),
+        g("Citation", "a link from the finding back to the exact evidence it used"),
+        g("Calibrate", "engine proposes policy deltas from your feedback; applied only if escalate-recall stays ≥ 0.98"),
+        g("Verified-recurring", "once you accept a finding, recurrences are suppressed (no new engine call)"),
+        g("Token ledger", "engine calls + estimated tokens spent, per project (Overview)"),
+        g("Read-only", "reads logs &amp; (read-only) your repo; never writes to or queries your running app"),
+        g("Credential ceiling", "the most it holds is a scoped git token — it opens PRs, never deploys"),
+        g("Your engine, your box", "Claude / Cursor / API / local — you choose; nothing leaves except to that engine"),
+    );
+    Ok(shell("guide", "guide", "Guide", &body))
+}
+
 // ---- project pages --------------------------------------------------------
 
 fn page_overview(store: &Store, project: &str) -> Result<String> {
@@ -777,10 +853,13 @@ fn shell_proj(project: &str, body: &str, title: &str) -> String {
     shell("proj", &format!("portfolio / {project}"), &format!("{project} · {title}"), body)
 }
 
-fn page_incidents(store: &Store, project: &str) -> Result<String> {
-    let rows: Vec<(String, _)> = store.list_incidents_for(project)?.into_iter().map(|i| (project.to_string(), i)).collect();
+fn page_incidents(store: &Store, project: &str, page: usize) -> Result<String> {
+    let allrows: Vec<(String, _)> = store.list_incidents_for(project)?.into_iter().map(|i| (project.to_string(), i)).collect();
+    let total = allrows.len();
+    let rows: Vec<_> = allrows.into_iter().skip((page - 1) * PER_PAGE).take(PER_PAGE).collect();
     let scope = "<span class=scope><a class=on href=#>this project</a><a href=/incidents>all projects</a></span>";
-    let body = format!("{}<h1>{} · incidents</h1>{}", subnav(project, "inc", scope), esc(project), incidents_table(store, &rows, false));
+    let body = format!("{}<h1>{} · incidents</h1>{}{}", subnav(project, "inc", scope), esc(project),
+        incidents_table(store, &rows, false), pager(&format!("/p/{}/incidents", urlenc(project)), page, total));
     Ok(shell_proj(project, &body, "Incidents"))
 }
 
@@ -908,28 +987,34 @@ fn page_sources(store: &Store, project: &str) -> Result<String> {
     Ok(shell_proj(project, &body, "Sources"))
 }
 
-fn page_explore(store: &Store, project: &str) -> Result<String> {
+fn page_explore(store: &Store, project: &str, page: usize) -> Result<String> {
     let policy = store.load_policy(project)?;
+    let total = policy.len();
     let mut tpl = String::new();
-    for r in policy.iter().take(80) {
+    for r in policy.iter().skip((page - 1) * PER_PAGE).take(PER_PAGE) {
+        let why = if r.reason.is_empty() { "<span class=sub>—</span>".to_string() } else { format!("<span class=sub>{}</span>", esc(&r.reason)) };
         tpl.push_str(&format!(
-            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}</td></tr>",
-            route_pill(r.route.as_str()), r.route.as_str(), tpl_details(&r.signature)));
+            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}</td><td>{}</td></tr>",
+            route_pill(r.route.as_str()), r.route.as_str(), tpl_details(&r.signature), why));
     }
-    if policy.is_empty() { tpl.push_str("<tr><td colspan=2 class=empty>No templates yet.</td></tr>"); }
+    if policy.is_empty() { tpl.push_str("<tr><td colspan=3 class=empty>No templates yet — run Warm.</td></tr>"); }
     let scope = "<span class=scope><a class=on href=#>this project</a><a href=/explore>all projects</a></span>";
     let body = format!(
-        "{}<h1>{} · explore</h1><p class=sub>mined templates &amp; their routes · click a template to expand · ask in NL on <a href=/ask>Ask</a></p>\
-<div class=tablewrap><table><colgroup><col class=sm><col class=sigcol></colgroup><tr><th>Route</th><th>Template (click to expand)</th></tr>{tpl}</table></div>",
-        subnav(project, "exp", scope), esc(project)
+        "{}<h1>{} · explore</h1>\
+<p class=sub>A <b>template</b> is a recurring log line with its variable bits masked (numbers→<code>&lt;n&gt;</code>, ids/paths→<code>&lt;str&gt;</code>) — one pattern per group of near-identical lines. \
+The <b>route</b> is how Tier-1 handles it; <b>why</b> is the engine's reason. Click a template to see the full pattern · ask in NL on <a href=/ask>Ask</a>.</p>\
+<div class=tablewrap><table><colgroup><col class=sm><col class=sigcol><col class=lg></colgroup>\
+<tr><th>Route</th><th>Template (pattern · click to expand)</th><th>Why</th></tr>{tpl}</table></div>{}",
+        subnav(project, "exp", scope), esc(project), pager(&format!("/p/{}/explore", urlenc(project)), page, total)
     );
     Ok(shell_proj(project, &body, "Explore"))
 }
 
-fn page_rules(store: &Store, project: &str) -> Result<String> {
+fn page_rules(store: &Store, project: &str, page: usize) -> Result<String> {
     let policy = store.load_policy(project)?;
+    let total = policy.len();
     let mut rows = String::new();
-    for r in &policy {
+    for r in policy.iter().skip((page - 1) * PER_PAGE).take(PER_PAGE) {
         let sug = if r.source == "warm-setup" || r.source == "calibration" { " <span class=\"pill blue\">engine</span>" } else { "" };
         // route action buttons (POST → set_route)
         let btn = |to: &str, label: &str, cls: &str, tip: &str| format!(
@@ -948,8 +1033,8 @@ fn page_rules(store: &Store, project: &str) -> Result<String> {
     let body = format!(
         "{}<h1>{} · Rules</h1><p class=sub>engine-authored Tier-1 policy · 0-token hot path · <span class=\"pill blue\">engine</span> = LLM-authored · click to re-route</p>\
 <div class=tablewrap><table><colgroup><col class=sm><col class=md><col class=sigcol><col class=lg></colgroup>\
-<tr><th>Route</th><th>Source</th><th>Template &amp; reason</th><th>Set</th></tr>{rows}</table></div>",
-        subnav(project, "rules", ""), esc(project)
+<tr><th>Route</th><th>Source</th><th>Template &amp; reason</th><th>Set</th></tr>{rows}</table></div>{}",
+        subnav(project, "rules", ""), esc(project), pager(&format!("/p/{}/rules", urlenc(project)), page, total)
     );
     Ok(shell_proj(project, &body, "Rules"))
 }

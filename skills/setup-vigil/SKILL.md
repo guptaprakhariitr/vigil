@@ -21,8 +21,12 @@ Work through these steps with the user, confirming before anything that creates 
 - Note the app's **source repo** (for grounding stack traces and validating fixes) if available.
 
 ## 2. Get `vigil`
-- If the repo is checked out: `cargo build --release` (needs `vigil` + `vigil-engine` side by side);
-  binary at `target/release/vigil`. Otherwise build the container per `docs/REFERENCE.md` (Deploy).
+- **Download the released binary** for the user's platform from
+  https://github.com/guptaprakhariitr/vigil/releases (the engine is bundled in). `chmod +x` it and
+  put it on PATH. Pick the asset matching `uname -sm` (e.g. `vigil-aarch64-apple-darwin`).
+- Or use the container image per `docs/REFERENCE.md` (Deploy).
+- Do NOT try to `cargo build` from this public repo — it depends on the private `vigil-engine` crate;
+  source builds are maintainer-only.
 - Sanity check: `vigil --version`.
 
 ## 3. Register the system as ONE project (many sources)

@@ -12,3 +12,9 @@ Cargo.lock
 .mcp.json
 *service-account*.json
 github_pat_*
+
+# runtime state / logs (never commit)
+*.db
+*.db-*
+*.log
+vigil.db*
