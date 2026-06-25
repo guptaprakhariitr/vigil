@@ -1,62 +1,51 @@
 # VigilAI — `vigil`
 
-The on-call engineer that runs on your **own** box. `vigil` is the open wrapper (CLI, adapters,
-schemas, packaging); the deterministic engine ships as the private `vigil-engine` crate.
+The on-call engineer that runs on your **own** box. Point it at your logs; it finds the root cause,
+cites the evidence, and (if you let it) opens a fix PR. Your infra, your engine (Claude / Cursor /
+API / local), your autonomy dial.
 
-**Your infra, your engine, your autonomy.** It runs where your code and logs already are, you pick
-the engine (your logged-in Claude / Cursor / an API key / deterministic-only), and you set how far it
-may act — from *notify* all the way to *open a PR*. The hot path is deterministic and spends **zero
-tokens**; the engine is one constrained, cited hop, only when a real incident is novel.
+## Setup
 
-## The loop
+**Build** (checkout `vigil` and `vigil-engine` side by side):
+```bash
+cargo build --release        # binary at target/release/vigil
 ```
-detect → triage (Tier-1 policy) → investigate (engine) → validate (git worktree) → gate (autonomy) → propose
-```
-- **Deterministic core:** ingest → template-mine → correlate → detect. The model only *proposes*; the
-  engine *validates*. Abstains when evidence is thin; every claim is cited to the evidence.
-- **Tier-1 routing policy:** a per-project mute/watch/escalate table the engine *authors* once at
-  warm-setup and refines from your feedback. Runs hot, 0 tokens, fully auditable. Unknown → escalate (safe).
-- **Do-no-harm:** read-only data plane; patches are only ever applied in an isolated worktree off the
-  **deployed SHA**; secret-bearing patches are refused before apply; a PR needs both a clean validation
-  **and** confidence ≥ threshold. Credential ceiling is a scoped git token — it never deploys.
+**Or run anywhere** with Docker / Compose / Helm — see [docs/REFERENCE.md](docs/REFERENCE.md#deploy).
 
-## Commands
-```
-vigil investigate <logs> --repo <dir> [--engine claude-cli|none] [--out report.md]   # one-shot cited RCA
-vigil project add <name> <logs> [--repo ..] [--autonomy ..] [--min-confidence ..]    # register a project
-vigil up [--project <name>]            # always-on daemon (watch → detect → triage → investigate → act)
-vigil sweep [--project <name>]         # batch: investigate every open escalate-routed incident once
-vigil warm <logs> --project <name>     # one engine call drafts the Tier-1 policy
-vigil policy / route <mute|watch|escalate> <id>    # view / give feedback on the policy
-vigil feedback <accept|reject> <id> [--noise]      # learning loop → deterministic rule delta
-vigil incidents / status / usage / audit           # store views, token ledger, audit trail
-vigil validate <patch> --repo <dir> [--sha ..] [--test ..]   # check a patch in an isolated worktree
-```
-`--autonomy` = notify | report | propose | merge | release. `--no-engine` runs deterministic-only.
+## Try it in 60 seconds
 
-## Deploy (anywhere)
-Runs as one lightweight, read-only, resource-capped agent — VM, Docker, Kubernetes, or on-prem.
+```bash
+# 1) one-shot root-cause on a log directory, grounded in your repo
+vigil investigate ./logs --repo .
+
+# 2) or watch a system continuously (a project = one app, all its containers)
+vigil project add myapp ./logs/web.log --repo .
+vigil project add-source myapp ./logs/worker.log
+vigil up --project myapp
 ```
-# Docker (built from the workspace root, which holds both crates)
-docker build -f vigil/Dockerfile -t vigil:latest .
-docker run --rm -v "$PWD/logs:/logs:ro" vigil:latest sweep /logs --project demo --no-engine
+No LLM configured? Add `--no-engine` — the deterministic pipeline (detect, group, triage) still runs.
+To enable root-cause analysis, BYO engine: `--engine claude-cli` (your logged-in Claude) or
+`--engine anthropic-api` (set `ANTHROPIC_API_KEY`).
 
-# Compose (single host)
-LOGS_DIR=./logs docker compose -f deploy/docker-compose.yml up -d
+## What you get
 
-# Kubernetes (Helm)
-helm install vigil deploy/helm/vigil --set logs.hostPath=/var/log/app --set autonomy=notify
 ```
-BYO engine: the deterministic pipeline runs out of the box; mount your logged-in Claude CLI (or wire an
-API key) to enable RCA. See `deploy/` for the chart and compose file.
-
-## Dev build
-Checkout `vigil` and `vigil-engine` side by side (path dependency), then:
+🔔 SEV2 myapp · NEW incident ×216 · blast 1 — ERROR payments cannot read 'id' of undefined …
+   ↳ cause: a refactor (ce92608) made charge() read session.customer.id; on Stripe timeout
+            `session` is undefined → null-deref at src/charge.ts:9  (conf 0.94)
+   ↳ patch: applies ✓ · tests skipped · secret-scan clean  →  branch vigil/fix-…
 ```
-cargo run -p vigil -- investigate fixtures/payments-logs --repo /tmp/payments-repo --project acme-payments
-cargo test   # deterministic cross-check tests
-```
+- A **cited** root cause (every claim tied to a log cluster, stack frame, or diff).
+- Noise filtered: thousands of lines and hundreds of recurrences → **one incident, a couple of engine calls**.
+- A **validated** fix (applied in a throwaway git worktree off your deployed SHA — never your working copy), opened as a PR only if you raised the autonomy dial.
 
-> Plan: `docs/coding_plan.md`. Validated findings & learn-loop log: `docs/FINDINGS.md`.
+Inspect anytime: `vigil incidents`, `vigil status`, `vigil ask "what broke and is it fixed?"`,
+or a live dashboard — `vigil tui` (terminal) / `vigil serve` (web).
 
-License: Apache-2.0 (wrapper). The engine is distributed as a bundled binary.
+## Learn more
+
+- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the pipeline, the Tier-1 policy, the do-no-harm guarantees, and the project/sources model.
+- **[docs/REFERENCE.md](docs/REFERENCE.md)** — every command and flag, every config/env option with its meaning, deploy guides, and a glossary.
+- **[docs/coding_plan.md](docs/coding_plan.md)** — the build plan. **[docs/FINDINGS.md](docs/FINDINGS.md)** — validated live-run results.
+
+License: Apache-2.0 (wrapper). The deterministic engine ships as a bundled binary.
