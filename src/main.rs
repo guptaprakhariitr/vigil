@@ -144,6 +144,10 @@ enum Cmd {
         db: String,
         #[arg(long, default_value_t = 8787)]
         port: u16,
+        /// UI access token/password. If omitted, reuse the stored one or generate
+        /// and print a fresh token (Jupyter-style). Set your own to fix it.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Show daemon health: events seen, open incidents, footprint.
     Status {
@@ -753,8 +757,8 @@ fn main() -> Result<()> {
         Cmd::Tui { project, db, interval, once } => {
             dash::tui(&db, &project, interval, once)?;
         }
-        Cmd::Serve { project, db, port } => {
-            dash::serve(&db, &project, port)?;
+        Cmd::Serve { project, db, port, token } => {
+            dash::serve(&db, &project, port, token)?;
         }
 
         Cmd::Status { db } => {

@@ -19,6 +19,10 @@ enforces, and the findings + fixes from an internal code review.
   off by default and sends nothing unless you both consent (`vigil telemetry on`) **and** set
   `VIGIL_TELEMETRY_ENDPOINT`.
 - **Local by default.** `vigil serve` binds to `127.0.0.1` only.
+- **The web UI is token-protected** (Jupyter-style): a token/password gates every page and action,
+  set via `--token` or auto-generated, persisted, and printed at startup. The token is carried in an
+  `HttpOnly; SameSite=Strict` cookie; an unauthenticated request gets a login page, never data. The
+  mutating actions (accept/reject a finding, re-route a rule, pause) require the same token.
 
 ## Internal review — findings & fixes
 

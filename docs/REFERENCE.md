@@ -78,7 +78,7 @@ Investigate **every** open escalate-routed incident in one pass (not just the do
 | `vigil ask "<question>"` | natural-language answer over the project's stored incidents/findings, cited; refuses to speculate. |
 | `vigil metrics` | host metrics: current load average + memory + recent peaks + a resource-**pressure** verdict (OOM/saturation). Sampled read-only from `/proc` (Linux/container); the daemon records them so the engine can correlate "load/OOM caused the crash." |
 | `vigil tui` | live terminal dashboard (refreshes in place). `--interval`, `--once`. |
-| `vigil serve` | read-only web dashboard on localhost. `--port` (default 8787). `GET /` HTML, `GET /api/incidents` JSON. |
+| `vigil serve` | multi-page web dashboard on localhost (portfolio → incidents → detail → sources/explore/patches/rules/config + system settings/ask), **token-protected (Jupyter-style)**. `--port` (default 8787). `--token <secret>` sets the access token/password (else one is generated & printed, and persisted). Open `http://127.0.0.1:<port>/?token=<token>`. `GET /api/incidents` returns JSON. Read-only views + a few safe POST actions (accept/reject a finding, re-route a rule, pause). |
 
 ### `vigil validate <patch>` — patch gate (standalone)
 Check a unified-diff patch in an isolated worktree. `--repo <dir>` (required), `--sha <deployed-sha>`
