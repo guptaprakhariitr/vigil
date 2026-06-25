@@ -60,6 +60,12 @@ enum Cmd {
         /// Stop after N passes (0 = forever).
         #[arg(long, default_value_t = 0)]
         max_iterations: u64,
+        /// Autonomy dial: notify | report | propose | merge | release.
+        #[arg(long, default_value = "notify")]
+        autonomy: String,
+        /// Minimum confidence before a code action is allowed.
+        #[arg(long, default_value_t = 0.7)]
+        min_confidence: f64,
     },
     /// Show daemon health: events seen, open incidents, footprint.
     Status {
@@ -102,6 +108,22 @@ enum Cmd {
         #[arg(long, default_value = "vigil.db")]
         db: String,
     },
+    /// Token ledger: engine calls + estimated tokens for a project.
+    Usage {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+    /// Append-only audit trail of decisions taken.
+    Audit {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
     /// Validate an engine-proposed patch in an isolated git worktree.
     Validate {
         /// path to a unified-diff patch file
@@ -123,6 +145,20 @@ fn sha_of(rc: &str) -> Option<&str> {
     let tok = rc.split_whitespace().next()?;
     let hexish = tok.len() >= 7 && tok.chars().all(|c| c.is_ascii_hexdigit());
     hexish.then_some(tok)
+}
+
+/// Rough token estimate for the ledger (~4 chars/token). Labeled "est" in UI.
+fn est_tokens(bundle: &serde_json::Value) -> i64 {
+    let chars = serde_json::to_string(bundle).map(|s| s.len()).unwrap_or(0);
+    (chars / 4 + 600) as i64 // + a fixed allowance for the system prompt & reply
+}
+
+fn action_name(a: &vigil_engine::policy::Act) -> &'static str {
+    match a {
+        vigil_engine::policy::Act::Notify => "notify only",
+        vigil_engine::policy::Act::Report => "report only",
+        vigil_engine::policy::Act::OpenPr { .. } => "open PR",
+    }
 }
 
 fn make_engine(no_engine: bool, engine: &str) -> Box<dyn EngineAdapter> {
@@ -166,13 +202,14 @@ fn main() -> Result<()> {
             }
         }
 
-        Cmd::Up { path, repo, project, db, engine, no_engine, interval, once, max_iterations } => {
+        Cmd::Up { path, repo, project, db, engine, no_engine, interval, once, max_iterations, autonomy, min_confidence } => {
             let mut store = Store::open(&db)?;
             let adapter = make_engine(no_engine, &engine);
             let policy = store.load_policy(&project)?;
+            let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
             eprintln!(
-                "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules\n  (read-only · Ctrl-C to stop)",
-                project, path.display(), adapter.name(), db, policy.len()
+                "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules · autonomy={}\n  (read-only · Ctrl-C to stop)",
+                project, path.display(), adapter.name(), db, policy.len(), autonomy.as_str()
             );
             let mut processed = 0usize;
             let mut iter = 0u64;
@@ -206,17 +243,43 @@ fn main() -> Result<()> {
                             // novel + escalate → spend one engine call
                             let repo_str = repo.as_ref().map(|p| p.display().to_string());
                             let seed = bundle::build(&incident, &project, repo_str.as_deref());
+                            store.record_usage(&project, "investigate", est_tokens(&seed))?;
                             match adapter.investigate(&seed) {
                                 Ok(f) if !f.abstain => {
                                     let short: String = f.cause.chars().take(160).collect();
                                     println!("   ↳ cause: {} (conf {:.2})", short, f.confidence);
                                     store.record_finding(id, &f.cause, f.confidence, &f.citations.join(","))?;
+                                    store.audit(&project, id, "investigate", "finding", &short)?;
                                     // do-no-harm: validate any proposed patch before trusting it.
+                                    let base = incident.recent_change.as_deref().and_then(sha_of);
+                                    let mut validated = false;
                                     if let (Some(patch), Some(r)) = (f.patch.as_ref(), repo.as_ref()) {
-                                        match validate::validate_patch(r, incident.recent_change.as_deref().and_then(sha_of), patch, None) {
-                                            Ok(v) => println!("   ↳ patch: {} [{}]", v.summary(), v.files.join(", ")),
+                                        match validate::validate_patch(r, base, patch, None) {
+                                            Ok(v) => {
+                                                println!("   ↳ patch: {} [{}]", v.summary(), v.files.join(", "));
+                                                store.audit(&project, id, "validate", if v.ok() { "ok" } else { "reject" }, &v.summary())?;
+                                                validated = v.ok();
+                                            }
                                             Err(e) => eprintln!("   ! validation error: {e}"),
                                         }
+                                    }
+                                    // autonomy gate → maybe open a PR with the validated fix.
+                                    let d = vigil_engine::policy::decide(autonomy, validated, f.confidence, min_confidence);
+                                    if let vigil_engine::policy::Act::OpenPr { auto_merge } = d.act {
+                                        if let (Some(patch), Some(r), Some(b)) = (f.patch.as_ref(), repo.as_ref(), base) {
+                                            let branch = format!("vigil/fix-{}", &top.template_id[..top.template_id.len().min(8)]);
+                                            let title = format!("fix: {}", short.replace('\n', " "));
+                                            match vigil_engine::act::open_pr(r, b, &branch, patch, &title, &f.cause, auto_merge) {
+                                                Ok(p) => {
+                                                    let where_ = p.pr_url.clone().unwrap_or_else(|| format!("branch {}", p.branch));
+                                                    println!("   ↳ proposed: {} — {}", where_, p.details.join("; "));
+                                                    store.audit(&project, id, "act", "open_pr", &where_)?;
+                                                }
+                                                Err(e) => eprintln!("   ! propose failed: {e}"),
+                                            }
+                                        }
+                                    } else {
+                                        eprintln!("   ↳ gate: {} ({})", action_name(&d.act), d.reason);
                                     }
                                 }
                                 Ok(f) => println!("   ↳ engine abstained: {}", f.reason.unwrap_or_default()),
@@ -284,6 +347,7 @@ fn main() -> Result<()> {
             eprintln!("· warm-setup: {} templates → 1 engine call ({})", templates.len(), adapter.name());
             let rules = triage::warm_setup(adapter.as_ref(), &project, &context, &templates)?;
             store.save_policy(&project, &rules)?;
+            store.record_usage(&project, "warm-setup", (templates.len() * 60 + 800) as i64)?;
             println!("✓ drafted {} policy rules (review with `vigil policy`):", rules.len());
             for r in &rules {
                 println!("  {:<9} {}", r.route.as_str(), r.signature);
@@ -316,6 +380,26 @@ fn main() -> Result<()> {
                     println!("✓ {} → {}", &id[..id.len().min(12)], Route::parse(&route).as_str());
                 }
                 None => println!("no incident matches template id prefix '{template}'"),
+            }
+        }
+
+        Cmd::Usage { project, db } => {
+            let store = Store::open(&db)?;
+            let (calls, toks) = store.usage(&project)?;
+            println!("VigilAI · usage · project={project}");
+            println!("  engine calls : {calls}");
+            println!("  est tokens   : ~{toks} (estimate; local pre-processing is $0)");
+        }
+
+        Cmd::Audit { project, db, limit } => {
+            let store = Store::open(&db)?;
+            let rows = store.list_audit(&project, limit)?;
+            if rows.is_empty() {
+                println!("(no audit entries for {project})");
+            }
+            for (ts, stage, action, detail) in &rows {
+                let short: String = detail.chars().take(80).collect();
+                println!("  {ts}  {stage:<10} {action:<8} {short}");
             }
         }
 
