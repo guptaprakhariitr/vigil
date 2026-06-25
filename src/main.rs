@@ -39,8 +39,9 @@ enum Cmd {
         show_bundle: bool,
     },
     /// Always-on daemon: watch a log path, detect & group incidents, investigate novel ones.
+    /// Omit <path> to run a registered project's saved config (`vigil project add`).
     Up {
-        path: PathBuf,
+        path: Option<PathBuf>,
         #[arg(long)]
         repo: Option<PathBuf>,
         #[arg(long, default_value = "default")]
@@ -76,6 +77,11 @@ enum Cmd {
     Incidents {
         #[arg(long, default_value = "vigil.db")]
         db: String,
+    },
+    /// Manage the project registry (portfolio). `add` / `list`.
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
     },
     /// Warm-setup: one engine call drafts the Tier-1 routing policy from observed templates.
     Warm {
@@ -161,6 +167,30 @@ fn action_name(a: &vigil_engine::policy::Act) -> &'static str {
     }
 }
 
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Register (or update) a project's watch config.
+    Add {
+        name: String,
+        path: PathBuf,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, default_value = "claude-cli")]
+        engine: String,
+        #[arg(long, default_value = "notify")]
+        autonomy: String,
+        #[arg(long, default_value_t = 0.7)]
+        min_confidence: f64,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+    /// List registered projects and their open-incident feed.
+    List {
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+}
+
 fn make_engine(no_engine: bool, engine: &str) -> Box<dyn EngineAdapter> {
     if no_engine || engine == "none" {
         Box::new(engine::NullEngine)
@@ -204,6 +234,24 @@ fn main() -> Result<()> {
 
         Cmd::Up { path, repo, project, db, engine, no_engine, interval, once, max_iterations, autonomy, min_confidence } => {
             let mut store = Store::open(&db)?;
+            // Resolve config: an explicit <path> is an ad-hoc run; otherwise load
+            // the registered project's saved watch config (Phase 4).
+            let reg = store.get_project(&project)?;
+            let (path, repo, engine, autonomy, min_confidence) = match (path, &reg) {
+                (Some(p), _) => (p, repo, engine, autonomy, min_confidence),
+                (None, Some(pr)) => (
+                    PathBuf::from(&pr.log_path),
+                    pr.repo.clone().map(PathBuf::from),
+                    pr.engine.clone(),
+                    pr.autonomy.clone(),
+                    pr.min_confidence,
+                ),
+                (None, None) => {
+                    return Err(anyhow::anyhow!(
+                        "no log path given and project '{project}' is not registered — use `vigil project add {project} <path>`"
+                    ))
+                }
+            };
             let adapter = make_engine(no_engine, &engine);
             let policy = store.load_policy(&project)?;
             let autonomy = vigil_engine::policy::Autonomy::parse(&autonomy);
@@ -333,6 +381,40 @@ fn main() -> Result<()> {
                 );
             }
         }
+
+        Cmd::Project { cmd } => match cmd {
+            ProjectCmd::Add { name, path, repo, engine, autonomy, min_confidence, db } => {
+                let store = Store::open(&db)?;
+                store.add_project(&vigil_engine::store::Project {
+                    name: name.clone(),
+                    log_path: path.display().to_string(),
+                    repo: repo.map(|p| p.display().to_string()),
+                    engine,
+                    autonomy: vigil_engine::policy::Autonomy::parse(&autonomy).as_str().to_string(),
+                    min_confidence,
+                })?;
+                println!("✓ registered project '{name}' (run `vigil up --project {name}`)");
+            }
+            ProjectCmd::List { db } => {
+                let store = Store::open(&db)?;
+                let projects = store.list_projects()?;
+                if projects.is_empty() {
+                    println!("(no projects — `vigil project add <name> <logs> [--repo ...]`)");
+                }
+                for p in &projects {
+                    let (open, top) = store.open_incident_count(&p.name)?;
+                    println!(
+                        "  {:<16} {:<8} conf≥{:.2}  {} open  {}",
+                        p.name,
+                        p.autonomy,
+                        p.min_confidence,
+                        open,
+                        top.as_deref().unwrap_or("—")
+                    );
+                    println!("      watch {}{}", p.log_path, p.repo.as_ref().map(|r| format!(" · repo {r}")).unwrap_or_default());
+                }
+            }
+        },
 
         Cmd::Warm { path, project, db, engine, context } => {
             let store = Store::open(&db)?;
