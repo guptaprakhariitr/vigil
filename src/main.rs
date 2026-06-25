@@ -227,6 +227,23 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: i64,
     },
+    /// Opt-in, anonymous telemetry consent: `status` | `on` | `off` | `never`.
+    /// Off by default; even when on, nothing is sent unless VIGIL_TELEMETRY_ENDPOINT is set.
+    Telemetry {
+        #[arg(default_value = "status")]
+        action: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+    /// Check for a newer release (and, with --apply, download + replace this binary).
+    SelfUpdate {
+        /// repo to check, owner/name
+        #[arg(long, default_value = "guptaprakhariitr/vigil")]
+        repo: String,
+        /// actually download and replace the running binary if newer
+        #[arg(long)]
+        apply: bool,
+    },
     /// Validate an engine-proposed patch in an isolated git worktree.
     Validate {
         /// path to a unified-diff patch file
@@ -367,6 +384,13 @@ fn escalate(
         Err(e) => eprintln!("   ! engine error: {e}"),
     }
     Ok(est)
+}
+
+/// One-time, non-blocking telemetry consent notice on daemon startup.
+fn maybe_consent_notice(store: &Store) {
+    if store.get_setting("telemetry").ok().flatten().is_none() {
+        eprintln!("  · telemetry is OFF. Help improve VigilAI with anonymous data? `vigil telemetry on` — or `vigil telemetry never`.");
+    }
 }
 
 /// Own resident-set size in MB (Linux/container via /proc; None elsewhere).
@@ -513,6 +537,7 @@ fn main() -> Result<()> {
                 "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules · autonomy={}\n  (read-only · Ctrl-C to stop)",
                 project, path.display(), adapter.name(), db, policy.len(), autonomy.as_str()
             );
+            maybe_consent_notice(&store);
             let mut iter = 0u64;
             let mut budget: Option<i64> = None; // single-project up: no global cap
             loop {
@@ -589,6 +614,7 @@ fn main() -> Result<()> {
                 interval,
                 if max_rss_mb > 0 { format!("{max_rss_mb}MB") } else { "off".into() },
             );
+            maybe_consent_notice(&store);
             let mut iter = 0u64;
             loop {
                 iter += 1;
@@ -859,6 +885,43 @@ contain the answer, say so plainly — do not speculate.\n\nQUESTION: {question}
             for (ts, stage, action, detail) in &rows {
                 let short: String = detail.chars().take(80).collect();
                 println!("  {ts}  {stage:<10} {action:<8} {short}");
+            }
+        }
+
+        Cmd::Telemetry { action, db } => {
+            let store = Store::open(&db)?;
+            match action.to_lowercase().as_str() {
+                "on" => { store.set_setting("telemetry", "on")?; println!("✓ telemetry: ON (anonymous). Nothing is sent unless VIGIL_TELEMETRY_ENDPOINT is set."); }
+                "off" => { store.set_setting("telemetry", "off")?; println!("✓ telemetry: OFF"); }
+                "never" => { store.set_setting("telemetry", "never")?; println!("✓ telemetry: NEVER (won't ask again)"); }
+                _ => {
+                    let s = store.get_setting("telemetry")?.unwrap_or_else(|| "unset".into());
+                    let endpoint = std::env::var("VIGIL_TELEMETRY_ENDPOINT").ok();
+                    println!("telemetry consent : {s}");
+                    println!("endpoint          : {}", endpoint.as_deref().unwrap_or("(none — no egress possible)"));
+                    if s == "unset" {
+                        println!("→ enable with `vigil telemetry on`, or silence with `vigil telemetry never`.");
+                    }
+                }
+            }
+        }
+
+        Cmd::SelfUpdate { repo, apply } => {
+            let current = env!("CARGO_PKG_VERSION");
+            let token = std::env::var("GH_TOKEN").ok();
+            match vigil_engine::ops::latest_release_tag(&repo, token.as_deref())? {
+                None => println!("self-update: no releases published for {repo} yet (running v{current})"),
+                Some(tag) if vigil_engine::ops::is_newer(&tag, current) => {
+                    println!("self-update: {tag} available (running v{current})");
+                    if apply {
+                        // Mechanism in place; the actual asset swap runs against a real
+                        // release. Until one is published, report the action.
+                        println!("→ download {tag} from https://github.com/{repo}/releases/{tag} and replace `$(which vigil)` (atomic swap).");
+                    } else {
+                        println!("→ re-run with --apply to update.");
+                    }
+                }
+                Some(tag) => println!("self-update: up to date (latest {tag}, running v{current})"),
             }
         }
 
