@@ -234,6 +234,13 @@ enum Cmd {
         #[arg(long, default_value = "claude-cli")]
         engine: String,
     },
+    /// Host metrics: current load/memory + recent peaks + resource-pressure verdict.
+    Metrics {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
     /// Token ledger: engine calls + estimated tokens for a project.
     Usage {
         #[arg(long, default_value = "default")]
@@ -382,7 +389,8 @@ fn escalate(
     use vigil_engine::policy::{decide, Act};
     let Some(top) = incident.top.clone() else { return Ok(0) };
     let repo_str = repo.map(|p| p.display().to_string());
-    let seed = bundle::build(incident, project, repo_str.as_deref());
+    let host = store.metrics_summary(project, 60)?; // resource pressure near the window
+    let seed = bundle::build_with_host(incident, project, repo_str.as_deref(), host);
     let est = est_tokens(&seed);
     store.record_usage(project, "investigate", est)?;
     match adapter.investigate(&seed) {
@@ -466,6 +474,9 @@ fn process_project_once(
     // Ingest EVERY source of the project and correlate them together, so a
     // shared-dependency failure across services is one incident (§3a). Each
     // source has its own persisted cursor; `service` is parsed from content.
+    // Sample host metrics each tick (read-only, ~µs) so resource pressure is
+    // recorded alongside the logs and available to the engine for correlation.
+    let _ = store.record_metrics(project, &vigil_engine::metrics::sample());
     let mut all_events = Vec::new();
     let mut n = 0usize;
     for src in sources {
@@ -540,7 +551,11 @@ fn main() -> Result<()> {
                 incident.top.as_ref().map(|t| t.template.as_str()).unwrap_or("(none)")
             );
             let repo_str = repo.as_ref().map(|p| p.display().to_string());
-            let seed = bundle::build(&incident, &project, repo_str.as_deref());
+            let hm = vigil_engine::metrics::sample();
+            let host = vigil_engine::metrics::pressure(&hm).map(|p| {
+                serde_json::json!({ "load1": hm.load1, "ncpu": hm.ncpu, "mem_used_pct": (hm.mem_used_pct*10.0).round()/10.0, "pressure": p })
+            });
+            let seed = bundle::build_with_host(&incident, &project, repo_str.as_deref(), host);
             if show_bundle {
                 eprintln!("--- evidence bundle ---\n{}", serde_json::to_string_pretty(&seed)?);
             }
@@ -953,6 +968,29 @@ contain the answer, say so plainly — do not speculate.\n\nQUESTION: {question}
             store.record_usage(&project, "ask", (prompt.len() / 4 + 400) as i64)?;
             let answer = adapter.complete(&prompt)?;
             println!("{}", answer.trim());
+        }
+
+        Cmd::Metrics { project, db } => {
+            let store = Store::open(&db)?;
+            // live sample now (also record it), then show the project's recent view.
+            let live = vigil_engine::metrics::sample();
+            let _ = store.record_metrics(&project, &live);
+            println!("VigilAI · host metrics · project={project}");
+            if !live.available {
+                println!("  (live host metrics unavailable on this OS — Linux/container reads /proc)");
+            } else {
+                println!("  load        : {:.2} / {:.2} / {:.2}  (1m/5m/15m over {} CPUs)", live.load1, live.load5, live.load15, live.ncpu);
+                println!("  memory      : {:.0}% used of {} MB", live.mem_used_pct, live.mem_total_mb);
+                match vigil_engine::metrics::pressure(&live) {
+                    Some(p) => println!("  ! pressure  : {p}"),
+                    None => println!("  pressure    : none (healthy)"),
+                }
+            }
+            if let Some(s) = store.metrics_summary(&project, 200)? {
+                println!("  recent peak : load {:.2} · mem {:.1}%  (last samples)",
+                    s.get("peak_load1").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                    s.get("peak_mem_used_pct").and_then(|v| v.as_f64()).unwrap_or(0.0));
+            }
         }
 
         Cmd::Usage { project, db } => {
