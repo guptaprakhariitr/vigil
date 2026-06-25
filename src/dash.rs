@@ -53,25 +53,53 @@ pub fn html_page(store: &Store, project: &str) -> Result<String> {
     let incs = store.list_incidents()?;
     let policy = store.load_policy(project)?;
     let (calls, toks) = store.usage(project)?;
+    let causes = store.ask_context(project, 50)?; // (sig, sev, status, count, cause)
     let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    // One-line preview of a long signature; full text lives in the title tooltip.
+    let preview = |s: &str| -> String {
+        let oneline = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if oneline.chars().count() > 120 {
+            format!("{}…", oneline.chars().take(120).collect::<String>())
+        } else {
+            oneline
+        }
+    };
 
     let mut rows = String::new();
     for i in &incs {
-        let fix = if i.has_finding { "✓ cause" } else { "—" };
+        let fix = if i.has_finding { "✓" } else { "—" };
         let sc = match i.severity.as_str() { "SEV1" | "SEV2" => "s2", "SEV3" => "s3", _ => "s4" };
         rows.push_str(&format!(
-            "<tr><td><span class=sev {sc}>{}</span></td><td>{}</td><td class=n>{}</td><td class=n>{}</td><td>{}</td><td class=sig>{}</td></tr>",
-            i.severity, i.status, i.count, i.blast_radius, fix, esc(&i.signature)
+            "<tr><td><span class=\"sev {sc}\">{}</span></td><td>{}</td><td class=n>{}</td><td class=n>{}</td><td class=c>{}</td><td class=sig title=\"{}\">{}</td></tr>",
+            i.severity, esc(&i.status), i.count, i.blast_radius, fix, esc(&i.signature), esc(&preview(&i.signature))
         ));
     }
     if incs.is_empty() {
         rows.push_str("<tr><td colspan=6 class=empty>No incidents — healthy.</td></tr>");
     }
+
+    // Root-cause panel: the most valuable info, for incidents that have a finding.
+    let mut causehtml = String::new();
+    for (sig, sev, _status, count, cause) in causes.iter() {
+        if let Some(c) = cause {
+            if !c.is_empty() {
+                let sc = match sev.as_str() { "SEV1" | "SEV2" => "s2", "SEV3" => "s3", _ => "s4" };
+                causehtml.push_str(&format!(
+                    "<div class=rca><div class=rcah><span class=\"sev {sc}\">{sev}</span> <span class=rcacount>×{count}</span> <span class=rcasig title=\"{}\">{}</span></div><p>{}</p></div>",
+                    esc(sig), esc(&preview(sig)), esc(c)
+                ));
+            }
+        }
+    }
+    if causehtml.is_empty() {
+        causehtml.push_str("<div class=empty>No root cause recorded yet.</div>");
+    }
+
     let mut prows = String::new();
     for r in &policy {
         prows.push_str(&format!(
-            "<tr><td><span class=route r-{0}>{0}</span></td><td>{1}</td><td class=sig>{2}</td></tr>",
-            r.route.as_str(), esc(&r.source), esc(&r.signature)
+            "<tr><td><span class=\"route r-{0}\">{0}</span></td><td>{1}</td><td class=sig title=\"{2}\">{3}</td></tr>",
+            r.route.as_str(), esc(&r.source), esc(&r.signature), esc(&preview(&r.signature))
         ));
     }
     if policy.is_empty() {
@@ -82,24 +110,33 @@ pub fn html_page(store: &Store, project: &str) -> Result<String> {
 <meta name=viewport content="width=device-width,initial-scale=1"><meta http-equiv=refresh content=5>
 <title>VigilAI · {project}</title><style>
 :root{{--bg:#0d1117;--pan:#141b24;--pan2:#1b2430;--line:#27313f;--tx:#dce3ec;--dim:#8a98a8;--ac:#2dd4bf}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}}
-.wrap{{max-width:980px;margin:0 auto;padding:32px 20px}}
+*{{box-sizing:border-box}}html,body{{max-width:100%;overflow-x:hidden}}
+body{{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}}
+.wrap{{max-width:1000px;margin:0 auto;padding:32px 20px}}
 h1{{font-size:22px;margin:0 0 4px}}h1 span{{color:var(--ac)}}.sub{{color:var(--dim);font-size:13px;margin:0 0 22px}}
 .stats{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}}
-.stat{{background:var(--pan);border:1px solid var(--line);border-radius:10px;padding:12px 16px;flex:1 1 120px}}
+.stat{{background:var(--pan);border:1px solid var(--line);border-radius:10px;padding:12px 16px;flex:1 1 110px}}
 .stat b{{display:block;font-size:24px;color:var(--ac);font-family:ui-monospace,monospace}}
 .stat span{{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em}}
 h2{{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:26px 0 10px;font-family:ui-monospace,monospace}}
-table{{width:100%;border-collapse:collapse;background:var(--pan);border:1px solid var(--line);border-radius:10px;overflow:hidden}}
+.tablewrap{{overflow-x:auto;border:1px solid var(--line);border-radius:10px}}
+table{{width:100%;border-collapse:collapse;background:var(--pan);table-layout:fixed}}
 th,td{{text-align:left;padding:9px 13px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}}
 th{{background:var(--pan2);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim)}}
-tr:last-child td{{border:none}}td.n{{font-family:ui-monospace,monospace}}td.sig{{color:var(--dim);font-family:ui-monospace,monospace;font-size:12px}}
-.sev{{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:6px}}.s2{{color:#ff8a8a;background:#2a1416}}.s3{{color:#f0b429;background:#2c2310}}.s4{{color:#9aa6b4;background:#1c232d}}
+tr:last-child td{{border:none}}td.n{{font-family:ui-monospace,monospace;text-align:right}}td.c{{text-align:center}}
+td.sig{{color:var(--dim);font-family:ui-monospace,monospace;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:0}}
+col.sigcol{{width:60%}}col.sm{{width:64px}}
+.sev{{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:6px;white-space:nowrap}}.s2{{color:#ff8a8a;background:#2a1416}}.s3{{color:#f0b429;background:#2c2310}}.s4{{color:#9aa6b4;background:#1c232d}}
 .route{{font-family:ui-monospace,monospace;font-size:11px;padding:2px 7px;border-radius:6px}}.r-escalate{{color:#ff8a8a;background:#2a1416}}.r-watch{{color:#f0b429;background:#2c2310}}.r-mute{{color:#8a98a8;background:#1c232d}}
 .empty{{color:var(--dim);text-align:center;padding:18px}}code{{font-family:ui-monospace,monospace;background:var(--pan2);padding:1px 5px;border-radius:4px}}
+.rca{{background:var(--pan);border:1px solid var(--line);border-left:3px solid var(--ac);border-radius:8px;padding:14px 16px;margin-bottom:12px}}
+.rcah{{display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}}
+.rcacount{{font-family:ui-monospace,monospace;color:var(--dim);font-size:12px}}
+.rcasig{{font-family:ui-monospace,monospace;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}}
+.rca p{{margin:0;color:var(--tx);font-size:13.5px;line-height:1.6;word-break:break-word}}
 footer{{margin-top:28px;color:#5d6b7c;font-size:11px;font-family:ui-monospace,monospace}}
 </style></head><body><div class=wrap>
-<h1><span>VigilAI</span> · {project}</h1><p class=sub>read-only live dashboard · auto-refresh 5s</p>
+<h1><span>VigilAI</span> · {project}</h1><p class=sub>read-only live dashboard · auto-refresh 5s · hover a signature for the full text</p>
 <div class=stats>
 <div class=stat><b>{events}</b><span>events</span></div>
 <div class=stat><b>{open}</b><span>open incidents</span></div>
@@ -107,8 +144,13 @@ footer{{margin-top:28px;color:#5d6b7c;font-size:11px;font-family:ui-monospace,mo
 <div class=stat><b>~{toks}</b><span>est tokens</span></div>
 <div class=stat><b>{}</b><span>policy rules</span></div>
 </div>
-<h2>Incidents</h2><table><tr><th>Sev</th><th>Status</th><th>Count</th><th>Blast</th><th>RCA</th><th>Signature</th></tr>{rows}</table>
-<h2>Tier-1 policy</h2><table><tr><th>Route</th><th>Source</th><th>Signature</th></tr>{prows}</table>
+<h2>Incidents</h2>
+<div class=tablewrap><table><colgroup><col class=sm><col class=sm><col class=sm><col class=sm><col class=sm><col class=sigcol></colgroup>
+<tr><th>Sev</th><th>Status</th><th>Count</th><th>Blast</th><th>RCA</th><th>Signature</th></tr>{rows}</table></div>
+<h2>Root cause</h2>{causehtml}
+<h2>Tier-1 policy</h2>
+<div class=tablewrap><table><colgroup><col class=sm><col class=sm><col class=sigcol></colgroup>
+<tr><th>Route</th><th>Source</th><th>Signature</th></tr>{prows}</table></div>
 <footer>vigil serve · {} incidents · CLI ↔ TUI ↔ Web parity, one store</footer>
 </div></body></html>"#,
         policy.len(), incs.len()

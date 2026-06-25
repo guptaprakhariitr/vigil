@@ -300,6 +300,17 @@ fn short_sig(s: &str) -> String {
     s.chars().take(48).collect()
 }
 
+/// Collapse whitespace and truncate a (possibly multi-KB traceback) signature to
+/// one readable line for terminal tables. Full text stays in the store / UI hover.
+fn trunc(s: &str, n: usize) -> String {
+    let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() > n {
+        format!("{}…", one.chars().take(n).collect::<String>())
+    } else {
+        one
+    }
+}
+
 fn action_name(a: &vigil_engine::policy::Act) -> &'static str {
     match a {
         vigil_engine::policy::Act::Notify => "notify only",
@@ -705,7 +716,7 @@ fn main() -> Result<()> {
                 println!("  scheduler : ⏸ PAUSED (all)");
             }
             if let Some(t) = incs.iter().find(|i| i.severity == "SEV2" || i.severity == "SEV1") {
-                println!("  ! top     : {} {}", t.severity, t.signature);
+                println!("  ! top     : {} {}", t.severity, trunc(&t.signature, 90));
             }
         }
 
@@ -719,7 +730,7 @@ fn main() -> Result<()> {
                 let fix = if i.has_finding { "✓ cause" } else { "—" };
                 println!(
                     "{:<5} {:<7} ×{:<5} blast {:<2} {:<7} {}",
-                    i.severity, i.status, i.count, i.blast_radius, fix, i.signature
+                    i.severity, i.status, i.count, i.blast_radius, fix, trunc(&i.signature, 96)
                 );
             }
         }
@@ -751,7 +762,7 @@ fn main() -> Result<()> {
                         p.autonomy,
                         p.min_confidence,
                         open,
-                        top.as_deref().unwrap_or("—")
+                        top.as_deref().map(|s| trunc(s, 80)).unwrap_or_else(|| "—".into())
                     );
                     println!("      watch {}{}", p.log_path, p.repo.as_ref().map(|r| format!(" · repo {r}")).unwrap_or_default());
                 }
@@ -785,7 +796,7 @@ fn main() -> Result<()> {
                 println!("(no policy yet — run `vigil warm <logs> --project {project}`)");
             }
             for r in &rules {
-                println!("  {:<9} [{:<10}] {}", r.route.as_str(), r.source, r.signature);
+                println!("  {:<9} [{:<10}] {}", r.route.as_str(), r.source, trunc(&r.signature, 90));
             }
         }
 
