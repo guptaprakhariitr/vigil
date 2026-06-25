@@ -46,6 +46,5 @@ or a live dashboard — `vigil tui` (terminal) / `vigil serve` (web).
 
 - **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the pipeline, the Tier-1 policy, the do-no-harm guarantees, and the project/sources model.
 - **[docs/REFERENCE.md](docs/REFERENCE.md)** — every command and flag, every config/env option with its meaning, deploy guides, and a glossary.
-- **[docs/FINDINGS.md](docs/FINDINGS.md)** — validated live-run results.
 
 License: Apache-2.0 (wrapper). The deterministic engine ships as a bundled binary.
