@@ -54,7 +54,16 @@ pub fn html_page(store: &Store, project: &str) -> Result<String> {
     let policy = store.load_policy(project)?;
     let (calls, toks) = store.usage(project)?;
     let causes = store.ask_context(project, 50)?; // (sig, sev, status, count, cause)
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    // Escape for BOTH text and attribute contexts — log-derived signatures/causes
+    // land in title="…" attributes, so quotes MUST be escaped or they break out
+    // (stored XSS). Order matters: & first.
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    };
     // One-line preview of a long signature; full text lives in the title tooltip.
     let preview = |s: &str| -> String {
         let oneline = s.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -181,7 +190,9 @@ pub fn serve(db: &str, project: &str, port: u16) -> Result<()> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let mut buf = [0u8; 1024];
+        // Don't let a slow/hung client block this single-threaded loop.
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut buf = [0u8; 2048];
         let nread = s.read(&mut buf).unwrap_or(0);
         let req = String::from_utf8_lossy(&buf[..nread]);
         let path = req.lines().next().and_then(|l| l.split_whitespace().nth(1)).unwrap_or("/");
