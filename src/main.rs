@@ -10,7 +10,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::Duration;
 use vigil_engine::engine::EngineAdapter;
-use vigil_engine::{bundle, correlate, detect, engine, ingest, report, store::Store};
+use vigil_engine::triage::{self, Candidate, Route};
+use vigil_engine::{bundle, correlate, detect, engine, ingest, report, store::Store, validate};
 
 #[derive(Parser)]
 #[command(name = "vigil", version, about = "VigilAI — the on-call engineer on your own box")]
@@ -70,6 +71,58 @@ enum Cmd {
         #[arg(long, default_value = "vigil.db")]
         db: String,
     },
+    /// Warm-setup: one engine call drafts the Tier-1 routing policy from observed templates.
+    Warm {
+        path: PathBuf,
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value = "claude-cli")]
+        engine: String,
+        /// Free-text system context for the policy author (frameworks, deploy cadence…).
+        #[arg(long, default_value = "")]
+        context: String,
+    },
+    /// Show the Tier-1 routing policy (mute/watch/escalate per template).
+    Policy {
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+    /// Feedback: set a template's route by id prefix (mute|watch|escalate).
+    Route {
+        /// route to apply
+        route: String,
+        /// template_id (or unique prefix) to apply it to
+        template: String,
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+    },
+    /// Validate an engine-proposed patch in an isolated git worktree.
+    Validate {
+        /// path to a unified-diff patch file
+        patch: PathBuf,
+        #[arg(long)]
+        repo: PathBuf,
+        /// deployed SHA to branch from (defaults to HEAD)
+        #[arg(long)]
+        sha: Option<String>,
+        /// test command to run in the worktree (e.g. "npm test")
+        #[arg(long)]
+        test: Option<String>,
+    },
+}
+
+/// Pull the leading commit SHA out of a `recent_change` string like
+/// `ce92608 "refactor charge()"`.
+fn sha_of(rc: &str) -> Option<&str> {
+    let tok = rc.split_whitespace().next()?;
+    let hexish = tok.len() >= 7 && tok.chars().all(|c| c.is_ascii_hexdigit());
+    hexish.then_some(tok)
 }
 
 fn make_engine(no_engine: bool, engine: &str) -> Box<dyn EngineAdapter> {
@@ -116,9 +169,10 @@ fn main() -> Result<()> {
         Cmd::Up { path, repo, project, db, engine, no_engine, interval, once, max_iterations } => {
             let mut store = Store::open(&db)?;
             let adapter = make_engine(no_engine, &engine);
+            let policy = store.load_policy(&project)?;
             eprintln!(
-                "▶ vigil up · project={} · watching {} · engine={} · db={}\n  (read-only · Ctrl-C to stop)",
-                project, path.display(), adapter.name(), db
+                "▶ vigil up · project={} · watching {} · engine={} · db={} · policy={} rules\n  (read-only · Ctrl-C to stop)",
+                project, path.display(), adapter.name(), db, policy.len()
             );
             let mut processed = 0usize;
             let mut iter = 0u64;
@@ -137,14 +191,19 @@ fn main() -> Result<()> {
                         let count = top.count as i64;
                         let blast = detect::blast_radius(&events, &top.template_id);
                         let sev = detect::severity(top.count, blast);
+                        // Tier-1: decide route before spending anything (sub-ms, 0 tokens).
+                        let cand = Candidate { template_id: &top.template_id, signature: &top.template, count: top.count, blast };
+                        let (route, why) = triage::route(&policy, &cand);
                         let (is_new, id) =
                             store.upsert_incident(&project, &top.template_id, &top.template, sev, blast as i64, count)?;
-                        if is_new {
+                        if route == Route::Mute {
+                            eprintln!("· +{} events · muted by policy ({}) — {}", n, why, top.template);
+                        } else if is_new && route == Route::Escalate {
                             println!(
                                 "🔔 {} {} · NEW incident ×{} · blast {} — {}",
                                 sev, project, count, blast, top.template
                             );
-                            // novel → escalate to the engine
+                            // novel + escalate → spend one engine call
                             let repo_str = repo.as_ref().map(|p| p.display().to_string());
                             let seed = bundle::build(&incident, &project, repo_str.as_deref());
                             match adapter.investigate(&seed) {
@@ -152,12 +211,21 @@ fn main() -> Result<()> {
                                     let short: String = f.cause.chars().take(160).collect();
                                     println!("   ↳ cause: {} (conf {:.2})", short, f.confidence);
                                     store.record_finding(id, &f.cause, f.confidence, &f.citations.join(","))?;
+                                    // do-no-harm: validate any proposed patch before trusting it.
+                                    if let (Some(patch), Some(r)) = (f.patch.as_ref(), repo.as_ref()) {
+                                        match validate::validate_patch(r, incident.recent_change.as_deref().and_then(sha_of), patch, None) {
+                                            Ok(v) => println!("   ↳ patch: {} [{}]", v.summary(), v.files.join(", ")),
+                                            Err(e) => eprintln!("   ! validation error: {e}"),
+                                        }
+                                    }
                                 }
                                 Ok(f) => println!("   ↳ engine abstained: {}", f.reason.unwrap_or_default()),
                                 Err(e) => eprintln!("   ! engine error: {e}"),
                             }
+                        } else if is_new {
+                            println!("👁  {} {} · watching ×{} blast {} ({}) — {}", sev, project, count, blast, why, top.template);
                         } else {
-                            eprintln!("· +{} events · recurring incident ×{} ({})", n, count, sev);
+                            eprintln!("· +{} events · recurring incident ×{} ({}, {})", n, count, sev, route.as_str());
                         }
                     } else {
                         eprintln!("· +{} events · no incident (healthy)", n);
@@ -201,6 +269,67 @@ fn main() -> Result<()> {
                     i.severity, i.status, i.count, i.blast_radius, fix, i.signature
                 );
             }
+        }
+
+        Cmd::Warm { path, project, db, engine, context } => {
+            let store = Store::open(&db)?;
+            let adapter = make_engine(false, &engine);
+            let events = ingest::ingest_path(&path, &project)?;
+            let incident = correlate::correlate(&events, None);
+            let templates: Vec<(String, String, usize)> = incident
+                .clusters
+                .iter()
+                .map(|c| (c.template_id.clone(), c.template.clone(), c.count))
+                .collect();
+            eprintln!("· warm-setup: {} templates → 1 engine call ({})", templates.len(), adapter.name());
+            let rules = triage::warm_setup(adapter.as_ref(), &project, &context, &templates)?;
+            store.save_policy(&project, &rules)?;
+            println!("✓ drafted {} policy rules (review with `vigil policy`):", rules.len());
+            for r in &rules {
+                println!("  {:<9} {}", r.route.as_str(), r.signature);
+            }
+        }
+
+        Cmd::Policy { project, db } => {
+            let store = Store::open(&db)?;
+            let rules = store.load_policy(&project)?;
+            if rules.is_empty() {
+                println!("(no policy yet — run `vigil warm <logs> --project {project}`)");
+            }
+            for r in &rules {
+                println!("  {:<9} [{:<10}] {}", r.route.as_str(), r.source, r.signature);
+            }
+        }
+
+        Cmd::Route { route, template, project, db } => {
+            let store = Store::open(&db)?;
+            // resolve a template-id prefix against known incidents/policy
+            let known: Vec<(String, String)> = store
+                .list_incidents()?
+                .into_iter()
+                .map(|i| (i.fingerprint, i.signature))
+                .collect();
+            let hit = known.iter().find(|(id, _)| id.starts_with(&template));
+            match hit {
+                Some((id, sig)) => {
+                    store.set_route(&project, id, sig, &Route::parse(&route).as_str(), "manual")?;
+                    println!("✓ {} → {}", &id[..id.len().min(12)], Route::parse(&route).as_str());
+                }
+                None => println!("no incident matches template id prefix '{template}'"),
+            }
+        }
+
+        Cmd::Validate { patch, repo, sha, test } => {
+            let p = std::fs::read_to_string(&patch)?;
+            let v = validate::validate_patch(&repo, sha.as_deref(), &p, test.as_deref())?;
+            println!("validation: {}", v.summary());
+            if !v.files.is_empty() {
+                println!("  files: {}", v.files.join(", "));
+            }
+            for d in &v.details {
+                println!("  · {d}");
+            }
+            std::process::exit(if v.ok() { 0 } else { 1 });
         }
     }
     Ok(())
