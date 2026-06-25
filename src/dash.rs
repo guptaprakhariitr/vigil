@@ -249,7 +249,7 @@ fn rail(active: &str) -> String {
 
 fn shell(rail_active: &str, crumb: &str, title: &str, body: &str) -> String {
     let back = if crumb == "portfolio" { String::new() } else {
-        "<button class=back onclick=\"history.back()\">← Back</button>".into()
+        "<button class=back onclick=\"history.back()\" title=\"Go back to the previous page\">← Back</button>".into()
     };
     format!(
         "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">\
@@ -530,7 +530,7 @@ fn page_portfolio(store: &Store) -> Result<String> {
     }
     if projects.is_empty() { cards.push_str("<div class=empty>No projects yet — add one below.</div>"); }
     let addform = "<h2>Add a project</h2><form method=post action=/projects/add class=card>\
-<div class=ask><input name=name placeholder=\"project name (your system)\"><input name=path placeholder=\"/path/to/logs/web.log\"><button class=\"btn pri\" type=submit>+ Add project</button></div>\
+<div class=ask><input name=name placeholder=\"project name (your system)\"><input name=path placeholder=\"/path/to/logs/web.log\"><button class=\"btn pri\" type=submit title=\"Register a new system as a project with its first log source — add its other containers as sources after\">+ Add project</button></div>\
 <p class=sub style=\"margin:0\">A project = one system; add its other containers as sources after.</p></form>";
     let body = format!(
         "<h1>Portfolio</h1><p class=sub>every system VigilAI watches · one control plane, isolated projects</p>\
@@ -674,9 +674,9 @@ fn page_ask(store: &Store, question: Option<&str>, project: Option<&str>, state:
     let running = matches!(state, AskState::Running);
     // greyed/disabled while a question is in flight — prevents double-asks
     let askbtn = if running {
-        "<button class=\"btn pri\" type=submit disabled>Asking…</button>".to_string()
+        "<button class=\"btn pri\" type=submit disabled title=\"An answer is already in flight\">Asking…</button>".to_string()
     } else {
-        "<button class=\"btn pri\" type=submit onclick=\"this.disabled=true;this.textContent='Asking…'\">Ask</button>".to_string()
+        "<button class=\"btn pri\" type=submit title=\"Ask the selected project's engine over its incidents — grounded, cited, and cached\" onclick=\"this.disabled=true;this.textContent='Asking…'\">Ask</button>".to_string()
     };
     let ans = match &state {
         AskState::Done(ok, out) => format!(
@@ -720,9 +720,9 @@ fn page_settings_sys(store: &Store) -> Result<String> {
         row("Events stored", format!("{events}")),
         row("Open incidents", format!("{open}")),
         row("Telemetry", format!("{} &nbsp; \
-<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=on><button class=\"btn gh\" style=\"padding:3px 9px;font-size:11px\">on</button></form> \
-<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=off><button class=btn style=\"padding:3px 9px;font-size:11px\">off</button></form> \
-<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=never><button class=btn style=\"padding:3px 9px;font-size:11px\">never</button></form> \
+<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=on><button class=\"btn gh\" title=\"Opt in to anonymous telemetry (nothing is sent unless VIGIL_TELEMETRY_ENDPOINT is also set)\" style=\"padding:3px 9px;font-size:11px\">on</button></form> \
+<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=off><button class=btn title=\"Turn telemetry off\" style=\"padding:3px 9px;font-size:11px\">off</button></form> \
+<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=never><button class=btn title=\"Disable telemetry and never ask again\" style=\"padding:3px 9px;font-size:11px\">never</button></form> \
 <span class=sub>(off by default; no egress unless VIGIL_TELEMETRY_ENDPOINT is set)</span>", esc(&tel))),
         row("Data plane", "read-only — reads logs &amp; repo; never queries prod DB".into()),
         row("Resource caps", "CPU/mem budget (`vigil run --max-rss-mb`); sheds its own load before the app".into()),
@@ -745,13 +745,13 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
         "<tr class=clk onclick=\"location='/p/{}/incident/{}'\"><td><span class=\"pill {}\">{}</span></td><td class=n>{}</td><td class=sig title=\"{}\">{}</td></tr>",
         urlenc(project), i.id, sev_pill(&i.severity), i.severity, i.count, esc(&i.signature), esc(&preview(&i.signature, 90)))).collect::<String>();
     let pausebtn = if paused {
-        "<form class=inline method=post action=pause><input type=hidden name=action value=resume><button class=\"btn gh\">▶ Resume</button></form>"
+        "<form class=inline method=post action=pause title=\"Resume watching this project (scheduler will process it again)\"><input type=hidden name=action value=resume><button class=\"btn gh\" title=\"Resume watching this project\">▶ Resume</button></form>"
     } else {
-        "<form class=inline method=post action=pause><input type=hidden name=action value=pause><button class=btn>⏸ Pause</button></form>"
+        "<form class=inline method=post action=pause><input type=hidden name=action value=pause><button class=btn title=\"Pause: the scheduler stops processing this project until resumed\">⏸ Pause</button></form>"
     };
     // engine actions resolve in-page (fetch → spinner → result), no new page
-    let act = |a: &str, label: &str, cls: &str| format!(
-        "<button class=\"btn {cls}\" onclick=\"runAct('{a}',this)\">{label}</button>");
+    let act = |a: &str, label: &str, cls: &str, tip: &str| format!(
+        "<button class=\"btn {cls}\" title=\"{tip}\" onclick=\"runAct('{a}',this)\">{label}</button>");
     let recent_html = if incs.is_empty() { "<tr><td colspan=3 class=empty>healthy</td></tr>".to_string() } else { recent };
     let body = format!(
         "{}<h1>{} <span class=sub>overview</span></h1>\
@@ -764,8 +764,10 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
 <h2>Recent incidents</h2><div class=tablewrap><table><colgroup><col class=sm><col class=sm><col class=sigcol></colgroup>\
 <tr><th>Sev</th><th>Count</th><th>Signature</th></tr>{}</table></div>",
         subnav(project, "ov", ""), esc(project), srcs.len(), policy.len(),
-        act("warm", "⚙ Warm policy", "pri"), act("sweep", "🔎 Sweep", ""),
-        act("investigate", "▶ Investigate once", ""), act("calibrate", "✓ Calibrate", ""),
+        act("warm", "⚙ Warm policy", "pri", "One engine call drafts the Tier-1 mute/watch/escalate policy from this project's templates"),
+        act("sweep", "🔎 Sweep", "", "Investigate every open escalate-routed incident now (batch)"),
+        act("investigate", "▶ Investigate once", "", "Run a single detection+investigation pass over this project's sources"),
+        act("calibrate", "✓ Calibrate", "", "Engine proposes policy deltas from your accept/reject feedback; applied only if escalate-recall stays ≥ 0.98"),
         pausebtn, urlenc(project), recent_html
     );
     Ok(shell_proj(project, &body, "Overview"))
@@ -815,9 +817,9 @@ fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<Str
             // actions
             body.push_str(&format!(
                 "<div class=kv>\
-<form class=inline method=post action=\"/p/{p}/incident/{id}/feedback\"><input type=hidden name=verdict value=accept><button class=\"btn pri\">✓ Accept (resolve · keep escalate)</button></form>\
-<form class=inline method=post action=\"/p/{p}/incident/{id}/feedback\"><input type=hidden name=verdict value=reject><button class=\"btn dn\">✕ Reject as noise (mute)</button></form>\
-<a class=btn href=\"/p/{p}/incident/{id}?tab=fix\">View fix →</a></div>\
+<form class=inline method=post action=\"/p/{p}/incident/{id}/feedback\"><input type=hidden name=verdict value=accept><button class=\"btn pri\" title=\"Confirm this finding is real: resolves the incident, keeps the signature on escalate, and suppresses future recurrences\">✓ Accept (resolve · keep escalate)</button></form>\
+<form class=inline method=post action=\"/p/{p}/incident/{id}/feedback\"><input type=hidden name=verdict value=reject><button class=\"btn dn\" title=\"Mark as noise/false alarm: mutes this signature so it won't escalate or spend engine calls again\">✕ Reject as noise (mute)</button></form>\
+<a class=btn href=\"/p/{p}/incident/{id}?tab=fix\" title=\"See the proposed patch, its validation, and the branch/PR\">View fix →</a></div>\
 <p class=sub>Follow-up in NL: <code>vigil ask \"…\" --project {}</code></p>", esc(project)));
         }
         "evidence" => {
@@ -900,7 +902,7 @@ fn page_sources(store: &Store, project: &str) -> Result<String> {
     let scope = "<span class=scope><a class=on href=#>this project</a><a href=/sources>all projects</a></span>";
     let body = format!(
         "{}<h1>{} · sources</h1><p class=sub>this system's containers/services — one project, many sources</p>{rows}\
-<form method=post action=sources/add><div class=ask><input name=path placeholder=\"/path/to/another/container.log\"><button class=\"btn pri\" type=submit>+ Add source</button></div></form>",
+<form method=post action=sources/add><div class=ask><input name=path placeholder=\"/path/to/another/container.log\"><button class=\"btn pri\" type=submit title=\"Attach another container/service log to this project — all sources are correlated together\">+ Add source</button></div></form>",
         subnav(project, "src", scope), esc(project)
     );
     Ok(shell_proj(project, &body, "Sources"))
@@ -930,15 +932,17 @@ fn page_rules(store: &Store, project: &str) -> Result<String> {
     for r in &policy {
         let sug = if r.source == "warm-setup" || r.source == "calibration" { " <span class=\"pill blue\">engine</span>" } else { "" };
         // route action buttons (POST → set_route)
-        let btn = |to: &str, label: &str, cls: &str| format!(
-            "<form class=inline method=post action=\"/p/{}/rules\"><input type=hidden name=template value=\"{}\"><input type=hidden name=sig value=\"{}\"><input type=hidden name=route value=\"{to}\"><button class=\"btn {cls}\" style=\"padding:3px 8px;font-size:11px\">{label}</button></form>",
+        let btn = |to: &str, label: &str, cls: &str, tip: &str| format!(
+            "<form class=inline method=post action=\"/p/{}/rules\"><input type=hidden name=template value=\"{}\"><input type=hidden name=sig value=\"{}\"><input type=hidden name=route value=\"{to}\"><button class=\"btn {cls}\" title=\"{tip}\" style=\"padding:3px 8px;font-size:11px\">{label}</button></form>",
             urlenc(project), esc(&r.template_id), esc(&r.signature));
         let reason = if r.reason.is_empty() { String::new() } else { format!("<div class=sub style=\"margin:3px 0 0\">{}</div>", esc(&r.reason)) };
         rows.push_str(&format!(
             "<tr><td><span class=\"pill {}\">{}</span></td><td>{}{sug}</td><td>{}{}</td>\
 <td>{}{}{}</td></tr>",
             route_pill(r.route.as_str()), r.route.as_str(), esc(&r.source), tpl_details(&r.signature), reason,
-            btn("escalate", "escalate", "dn"), btn("watch", "watch", ""), btn("mute", "mute", "gh")));
+            btn("escalate", "escalate", "dn", "Send this signature to the engine for root-cause when it's a novel incident"),
+            btn("watch", "watch", "", "Track it and alert on change, but don't spend an engine call"),
+            btn("mute", "mute", "gh", "Known noise — never alert or escalate this signature")));
     }
     if policy.is_empty() { rows.push_str("<tr><td colspan=4 class=empty>No rules — run <code>vigil warm</code>.</td></tr>"); }
     let body = format!(
@@ -966,7 +970,7 @@ fn page_config(store: &Store, project: &str) -> Result<String> {
 <div class=setrow><b>Autonomy</b><select name=autonomy class=v>{}</select></div>\
 <div class=setrow><b>Min confidence</b><input class=v name=min_confidence value=\"{:.2}\" style=\"width:90px;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
 <div class=setrow><b>Repo @ SHA</b><input class=v name=repo value=\"{}\" placeholder=\"/path/to/repo\" style=\"flex:1;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
-<div class=actions style=\"margin-top:12px\"><button class=\"btn pri\" type=submit>Save config</button></div></div></form>\
+<div class=actions style=\"margin-top:12px\"><button class=\"btn pri\" type=submit title=\"Persist this project's engine, autonomy, confidence threshold and repo (overrides portfolio defaults)\">Save config</button></div></div></form>\
 <h2>Context &amp; usage</h2><div class=card>{}{}</div>",
                 subnav(project, "cfg", ""), esc(project), eng_opts, auto_opts, p.min_confidence,
                 esc(p.repo.as_deref().unwrap_or("")),
