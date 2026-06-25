@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app.kubernetes.io/name: vigil
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1                     # one aggregator per environment
+  strategy: { type: Recreate }    # single writer to the SQLite store
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vigil
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vigil
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: vigil
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - up
+            - --project
+            - {{ .Values.project | quote }}
+            - --db
+            - /var/lib/vigil/vigil.db
+            - --autonomy
+            - {{ .Values.autonomy | quote }}
+            - --min-confidence
+            - {{ .Values.minConfidence | quote }}
+            {{- if eq .Values.engine.mode "none" }}
+            - --no-engine
+            {{- end }}
+            - --interval
+            - "15"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/vigil
+            - name: tmp
+              mountPath: /tmp
+            {{- if or .Values.logs.existingClaim .Values.logs.hostPath }}
+            - name: logs
+              mountPath: /logs
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.logs.existingClaim }}
+        - name: logs
+          persistentVolumeClaim:
+            claimName: {{ .Values.logs.existingClaim }}
+            readOnly: true
+        {{- else if .Values.logs.hostPath }}
+        - name: logs
+          hostPath:
+            path: {{ .Values.logs.hostPath }}
+        {{- end }}

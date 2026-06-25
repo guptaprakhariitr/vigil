@@ -1,0 +1,52 @@
+name: release
+# Build the vigil binary + container on a version tag and publish to the GitHub
+# Release and GHCR. The deterministic engine lives in a separate private repo, so
+# CI checks it out alongside (needs a read token in the ENGINE_REPO_TOKEN secret).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: vigil }
+      - uses: actions/checkout@v4
+        with:
+          repository: guptaprakhariitr/vigil-engine
+          token: ${{ secrets.ENGINE_REPO_TOKEN }}
+          path: vigil-engine
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        run: cd vigil && cargo build --release && strip target/release/vigil
+      - name: attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vigil/target/release/vigil
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: vigil }
+      - uses: actions/checkout@v4
+        with:
+          repository: guptaprakhariitr/vigil-engine
+          token: ${{ secrets.ENGINE_REPO_TOKEN }}
+          path: vigil-engine
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: vigil/Dockerfile
+          push: true
+          tags: ghcr.io/guptaprakhariitr/vigil:latest,ghcr.io/guptaprakhariitr/vigil:${{ github.ref_name }}

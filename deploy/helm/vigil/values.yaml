@@ -1,0 +1,36 @@
+# VigilAI Helm values. The agent runs as a lightweight Deployment with its state
+# on a PVC. Read-only by design; resource caps keep it non-impacting (§9b).
+image:
+  repository: ghcr.io/guptaprakhariitr/vigil
+  tag: ""          # defaults to .Chart.appVersion
+  pullPolicy: IfNotPresent
+
+project: default
+
+# Where the agent reads logs from. Point this at your app's log volume / sidecar.
+logs:
+  # An existing PVC or hostPath mounted read-only at /logs.
+  existingClaim: ""
+  hostPath: ""
+
+engine:
+  # "none" = deterministic-only (default, no engine needed).
+  # To enable RCA, BYO engine: mount a logged-in Claude CLI or wire an API key.
+  mode: none
+
+autonomy: notify      # notify | report | propose | merge | release
+minConfidence: 0.7
+
+# Performance guardrails (do-no-harm): capped + non-root + read-only root fs.
+resources:
+  requests: { cpu: 25m, memory: 64Mi }
+  limits:   { cpu: 250m, memory: 256Mi }
+
+persistence:
+  size: 1Gi
+  storageClass: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001

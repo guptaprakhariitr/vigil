@@ -1,0 +1,9 @@
+apiVersion: v2
+name: vigil
+description: VigilAI — self-hosted, BYO-engine observability & root-cause autopilot
+type: application
+version: 0.1.0
+appVersion: "0.0.1"
+keywords: [observability, rca, on-call, self-hosted]
+home: https://github.com/guptaprakhariitr/vigil
+sources: [https://github.com/guptaprakhariitr/vigil]

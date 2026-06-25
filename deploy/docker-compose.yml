@@ -1,0 +1,21 @@
+# Quick VM / single-host deploy. Watches a log directory you mount in and keeps
+# its state on a named volume. BYO engine: by default runs deterministic-only
+# (--no-engine); mount your Claude CLI + config to enable RCA.
+services:
+  vigil:
+    image: ghcr.io/guptaprakhariitr/vigil:latest
+    # build: { context: .., dockerfile: vigil/Dockerfile }   # uncomment to build locally
+    restart: unless-stopped
+    command: ["up", "--project", "${VIGIL_PROJECT:-default}", "--db", "/var/lib/vigil/vigil.db", "--no-engine"]
+    volumes:
+      - vigil-data:/var/lib/vigil          # state (SQLite store)
+      - ${LOGS_DIR:-./logs}:/logs:ro       # the logs to watch (read-only)
+      - ${REPO_DIR:-./repo}:/repo:ro       # the deployed repo (read-only)
+      # - ${HOME}/.claude:/home/vigil/.claude:ro   # BYO engine: your logged-in Claude
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  vigil-data:

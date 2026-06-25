@@ -1,0 +1,7 @@
+**/target
+**/*.db
+**/*.db-*
+.git
+fixtures
+docs
+deploy
