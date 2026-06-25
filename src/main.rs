@@ -200,6 +200,17 @@ enum Cmd {
         #[arg(long)]
         apply: bool,
     },
+    /// Ask a natural-language question, answered over the on-box incident store.
+    Ask {
+        /// the question, e.g. "what's the worst incident and is it fixed?"
+        question: String,
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, default_value = "vigil.db")]
+        db: String,
+        #[arg(long, default_value = "claude-cli")]
+        engine: String,
+    },
     /// Token ledger: engine calls + estimated tokens for a project.
     Usage {
         #[arg(long, default_value = "default")]
@@ -804,6 +815,31 @@ fn main() -> Result<()> {
                 store.audit(&project, 0, "calibrate", "blocked", &format!("recall {:.2} < {:.2}", c.recall, c.gate))?;
                 println!("· proposal would regress escalate-recall — surfaced as suggestion, NOT applied");
             }
+        }
+
+        Cmd::Ask { question, project, db, engine } => {
+            let store = Store::open(&db)?;
+            let ctx = store.ask_context(&project, 20)?;
+            if ctx.is_empty() {
+                println!("(no incidents recorded for '{project}' yet — run `vigil up`/`sweep` first)");
+                return Ok(());
+            }
+            let ctx_json: Vec<serde_json::Value> = ctx
+                .iter()
+                .map(|(sig, sev, status, count, cause)| {
+                    serde_json::json!({ "signature": sig, "severity": sev, "status": status, "count": count, "cause": cause })
+                })
+                .collect();
+            let prompt = format!(
+                "You are VigilAI's assistant. Using ONLY the incident context below for project '{project}', \
+answer the operator's question concisely and cite the signature(s) you used. If the context does not \
+contain the answer, say so plainly — do not speculate.\n\nQUESTION: {question}\n\nCONTEXT:\n{}",
+                serde_json::to_string_pretty(&ctx_json)?
+            );
+            let adapter = make_engine(false, &engine)?;
+            store.record_usage(&project, "ask", (prompt.len() / 4 + 400) as i64)?;
+            let answer = adapter.complete(&prompt)?;
+            println!("{}", answer.trim());
         }
 
         Cmd::Usage { project, db } => {
