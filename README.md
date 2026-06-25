@@ -44,9 +44,9 @@ chmod +x vigil && ./vigil --version
 ```
 **Or run anywhere** with Docker / Compose / Helm — see [docs/REFERENCE.md](docs/REFERENCE.md#deploy).
 
-The macOS binary is **Developer ID–signed** (Team `86F7TVY8RD`, hardened runtime). Until it's
-notarized, macOS may quarantine a downloaded file — clear it once with
-`xattr -dr com.apple.quarantine ./vigil`. Linux x86_64 binary + the container image are also published.
+The macOS binary is **Developer ID–signed and notarized by Apple** (Team `86F7TVY8RD`, hardened
+runtime). Linux x86_64 binary + the container image are also published. (If a download is ever
+quarantined, `xattr -dr com.apple.quarantine ./vigil` clears it.)
 
 > Building from source needs the private `vigil-engine` crate beside this repo, so it's for
 > maintainers; everyone else uses the released binary or container above.
