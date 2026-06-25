@@ -23,11 +23,13 @@ jobs:
           path: vigil-engine
       - uses: dtolnay/rust-toolchain@stable
       - name: build
-        run: cd vigil && cargo build --release && strip target/release/vigil
+        run: |
+          cd vigil && cargo build --release && strip target/release/vigil
+          cp target/release/vigil vigil-x86_64-unknown-linux-gnu
       - name: attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: vigil/target/release/vigil
+          files: vigil/vigil-x86_64-unknown-linux-gnu
 
   container:
     runs-on: ubuntu-latest
