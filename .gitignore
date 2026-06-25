@@ -1,0 +1,14 @@
+/target
+**/target
+Cargo.lock
+# secrets — never commit (global RULE #1)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.p8
+.mcp.json
+*service-account*.json
+github_pat_*
