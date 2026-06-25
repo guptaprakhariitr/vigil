@@ -4,6 +4,8 @@ The on-call engineer that runs on your **own** box. Point it at your logs; it fi
 cites the evidence, and (if you let it) opens a fix PR. Your infra, your engine (Claude / Cursor /
 API / local), your autonomy dial.
 
+**[Landing page →](https://guptaprakhariitr.github.io/vigil/)** · [Releases](https://github.com/guptaprakhariitr/vigil/releases) · [How it works](docs/HOW-IT-WORKS.md) · [Reference](docs/REFERENCE.md)
+
 ## Get started with your coding agent
 
 The fastest way to set this up is to let **Claude Code** (or **Cursor**) do it. Paste this prompt:
