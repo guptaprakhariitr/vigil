@@ -8,7 +8,25 @@
 use anyhow::Result;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::process::Command;
 use vigil_engine::store::Store;
+
+/// Run the SAME `vigil` binary for an action (full CLI parity from the UI), with
+/// args passed literally (no shell → no injection). Returns (ok, combined output).
+/// `db` is appended as `--db <db>`. Slow ops (warm/sweep/calibrate) block until done.
+fn run_vigil(db: &str, args: &[&str]) -> (bool, String) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| "vigil".into());
+    let mut cmd = Command::new(exe);
+    cmd.args(args).arg("--db").arg(db);
+    match cmd.output() {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            (o.status.success(), s)
+        }
+        Err(e) => (false, format!("failed to run vigil: {e}")),
+    }
+}
 
 fn sev_emoji(s: &str) -> &'static str {
     match s {
@@ -160,7 +178,20 @@ pre.diff .add{color:var(--teal);background:rgba(63,184,160,.12);display:block}pr
 .btn{display:inline-flex;align-items:center;gap:6px;font:600 12.5px -apple-system,sans-serif;border-radius:8px;padding:8px 13px;border:1px solid var(--line);background:#fff;color:var(--text);cursor:pointer}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}.btn.gh{border-color:#bfe6dd;color:var(--teal)}.btn.dn{border-color:#f4c9bd;color:#c2492e}
 form.inline{display:inline}
-.ask{display:flex;gap:8px;margin:10px 0 18px}.ask input{flex:1;font:13px ui-monospace,monospace;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--text)}
+.ask{display:flex;gap:8px;margin:10px 0 14px;flex-wrap:wrap}.ask input,.ask select{font:13px ui-monospace,monospace;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--text)}.ask input{flex:1;min-width:240px}
+.back{display:inline-flex;align-items:center;gap:5px;font:11px ui-monospace,monospace;color:var(--accent);background:#fff;border:1px solid var(--line);border-radius:7px;padding:3px 10px;cursor:pointer}
+.back:hover{background:var(--soft)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 16px}
+.cause2{font-size:14px;line-height:1.72;color:var(--text)}.cause2 p{margin:0 0 10px}.cause2 code{background:#fff;border:1px solid #f0ddb5;color:#9a5a00;font-size:12px}
+.cause2 .ref{font-family:ui-monospace,monospace;font-size:11.5px;color:var(--teal);background:var(--tealbg);border:1px solid #bfe6dd;border-radius:5px;padding:0 5px}
+details.tpl{border:1px solid var(--line);border-radius:7px;margin:5px 0;background:#fff}
+details.tpl>summary{cursor:pointer;padding:7px 10px;font-family:ui-monospace,monospace;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;list-style:none}
+details.tpl>summary::-webkit-details-marker{display:none}
+details.tpl[open]>summary{color:var(--text);white-space:normal}
+details.tpl pre{margin:0;padding:9px 11px;border-top:1px solid var(--line);font:11.5px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;background:#FAF6EE;color:var(--text)}
+.flash{background:var(--tealbg);border:1px solid #bfe6dd;color:var(--teal);border-radius:9px;padding:10px 13px;margin-bottom:14px;font-size:13px}
+.flash.bad{background:#fde6e0;border-color:#f4c9bd;color:#c2492e}
+pre.out{background:#0E0B07;color:#cdbf9c;border-radius:9px;padding:13px 15px;overflow-x:auto;font:11.5px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word}
 footer{margin-top:26px;color:#a89c86;font:11px ui-monospace,monospace}
 "#;
 
@@ -192,13 +223,38 @@ fn rail(active: &str) -> String {
 }
 
 fn shell(rail_active: &str, crumb: &str, title: &str, body: &str) -> String {
+    let back = if crumb == "portfolio" { String::new() } else {
+        "<button class=back onclick=\"history.back()\">← Back</button>".into()
+    };
     format!(
         "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">\
 <title>VigilAI · {}</title><style>{CSS}</style></head><body>{SPRITE}\
-<div class=top><span class=brand>Vigil<b>AI</b></span><span class=crumb>{}</span><span class=sp></span>\
+<div class=top><span class=brand>Vigil<b>AI</b></span>{back}<span class=crumb>{}</span><span class=sp></span>\
 <span class=pill>self-hosted</span></div><div class=shell>{}<main class=main>{}</main></div></body></html>",
         esc(title), esc(crumb), rail(rail_active), body
     )
+}
+
+/// Make the engine's plain-text cause readable: `backtick`→<code> and grouped
+/// into short paragraphs. Input is escaped first (single pass; robust).
+fn format_cause(s: &str) -> String {
+    let escd = esc(s);
+    // backtick code spans: odd-index segments are inside backticks
+    let mut html = String::new();
+    for (i, seg) in escd.split('`').enumerate() {
+        if i % 2 == 1 { html.push_str(&format!("<code>{seg}</code>")); } else { html.push_str(seg); }
+    }
+    // group ~2 sentences per paragraph for readability
+    let sentences: Vec<&str> = html.split_inclusive(". ").collect();
+    let mut out = String::new();
+    let mut buf = String::new();
+    for (k, sent) in sentences.iter().enumerate() {
+        buf.push_str(sent);
+        if (k + 1) % 2 == 0 { out.push_str(&format!("<p>{}</p>", buf.trim())); buf.clear(); }
+    }
+    if !buf.trim().is_empty() { out.push_str(&format!("<p>{}</p>", buf.trim())); }
+    if out.is_empty() { out = format!("<p>{}</p>", html); }
+    out
 }
 
 fn subnav(project: &str, active: &str, scope_other: &str) -> String {
@@ -226,14 +282,14 @@ fn html(b: String) -> Resp { Resp { status: 200, ctype: "text/html; charset=utf-
 fn redirect(to: String) -> Resp { Resp { status: 303, ctype: "text/html".into(), body: String::new(), location: Some(to) } }
 
 /// Route a request. `method` is GET/POST; `form` is the POST body (urlencoded).
-pub fn route(store: &Store, default_project: &str, method: &str, path: &str, form: &str) -> Result<Resp> {
+pub fn route(store: &Store, db: &str, default_project: &str, method: &str, path: &str, form: &str) -> Result<Resp> {
     let parts: Vec<String> = path.split('?').next().unwrap_or("/").trim_matches('/')
         .split('/').filter(|s| !s.is_empty()).map(urldec).collect();
     let p: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
     let query = path.split('?').nth(1).unwrap_or("");
 
     if method == "POST" {
-        return handle_post(store, &p, form);
+        return handle_post(store, db, &p, form);
     }
     let r = match p.as_slice() {
         [] => html(page_portfolio(store)?),
@@ -247,7 +303,19 @@ pub fn route(store: &Store, default_project: &str, method: &str, path: &str, for
         ["sources"] => html(page_all_sources(store)?),
         ["explore"] => html(page_all_explore(store)?),
         ["patches"] => html(page_all_patches(store)?),
-        ["ask"] => html(page_ask(store, None)?),
+        ["ask"] => {
+            let q = form_get(query, "q").filter(|s| !s.is_empty());
+            let proj = form_get(query, "project").filter(|s| !s.is_empty())
+                .or_else(|| store.list_projects().ok().and_then(|ps| ps.into_iter().map(|p| p.name).next()));
+            let answer = match (&q, &proj) {
+                (Some(q), Some(pr)) => {
+                    let (ok, out) = run_vigil(db, &["ask", q, "--project", pr]);
+                    Some((ok, out))
+                }
+                _ => None,
+            };
+            html(page_ask(store, q.as_deref(), proj.as_deref(), answer)?)
+        }
         ["settings"] => html(page_settings_sys(store)?),
         ["p", proj] => html(page_overview(store, proj)?),
         ["p", proj, "incidents"] => html(page_incidents(store, proj)?),
@@ -269,8 +337,67 @@ pub fn route(store: &Store, default_project: &str, method: &str, path: &str, for
     Ok(r)
 }
 
-fn handle_post(store: &Store, p: &[&str], form: &str) -> Result<Resp> {
+fn action_result(title: &str, ok: bool, out: &str, back: &str) -> Resp {
+    let cls = if ok { "" } else { "bad" };
+    let body = format!(
+        "<button class=back onclick=\"history.back()\">← Back</button> <a class=back href=\"{back}\">continue →</a>\
+<h1>{}</h1><div class=flash {cls}>{}</div><h2>output</h2><pre class=out>{}</pre>",
+        esc(title), if ok { "done" } else { "failed" }, esc(out)
+    );
+    html(format!("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">\
+<title>VigilAI · {}</title><style>{CSS}</style></head><body><main class=main style=\"max-width:900px;margin:0 auto\">{}</main></body></html>", esc(title), body))
+}
+
+fn handle_post(store: &Store, db: &str, p: &[&str], form: &str) -> Result<Resp> {
     match p {
+        // --- engine/daemon actions: run the SAME vigil binary, show output ---
+        ["projects", "add"] => {
+            let name = form_get(form, "name").unwrap_or_default();
+            let path = form_get(form, "path").unwrap_or_default();
+            if name.is_empty() || path.is_empty() { return Ok(redirect("/".into())); }
+            let (ok, out) = run_vigil(db, &["project", "add", &name, &path]);
+            return Ok(action_result("Add project", ok, &out, &format!("/p/{}", urlenc(&name))));
+        }
+        ["p", proj, "sources", "add"] => {
+            let path = form_get(form, "path").unwrap_or_default();
+            if !path.is_empty() { let _ = run_vigil(db, &["project", "add-source", proj, &path]); }
+            return Ok(redirect(format!("/p/{}/sources", urlenc(proj))));
+        }
+        ["p", proj, "action"] => {
+            let act = form_get(form, "action").unwrap_or_default();
+            let back = format!("/p/{}", urlenc(proj));
+            let srcs = store.list_sources(proj)?;
+            let src = srcs.first().cloned().unwrap_or_default();
+            let (title, args): (&str, Vec<String>) = match act.as_str() {
+                "warm" => ("Warm policy", vec!["warm".into(), src, "--project".into(), proj.to_string()]),
+                "sweep" => ("Sweep (investigate all)", vec!["sweep".into(), "--project".into(), proj.to_string()]),
+                "investigate" => ("Investigate once", vec!["up".into(), "--project".into(), proj.to_string(), "--once".into()]),
+                "calibrate" => ("Calibrate policy", vec!["calibrate".into(), "--project".into(), proj.to_string(), "--apply".into()]),
+                _ => return Ok(redirect(back)),
+            };
+            let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let (ok, out) = run_vigil(db, &argrefs);
+            return Ok(action_result(title, ok, &out, &back));
+        }
+        ["p", proj, "config"] => {
+            let engine = form_get(form, "engine").unwrap_or_else(|| "claude-cli".into());
+            let autonomy = form_get(form, "autonomy").unwrap_or_else(|| "notify".into());
+            let minc = form_get(form, "min_confidence").unwrap_or_else(|| "0.7".into());
+            let srcs = store.list_sources(proj)?;
+            let src = srcs.first().cloned().unwrap_or_default();
+            let mut args = vec!["project".to_string(), "add".into(), proj.to_string(), src,
+                "--engine".into(), engine, "--autonomy".into(), autonomy, "--min-confidence".into(), minc];
+            if let Some(repo) = form_get(form, "repo").filter(|s| !s.is_empty()) { args.push("--repo".into()); args.push(repo); }
+            let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let _ = run_vigil(db, &argrefs);
+            return Ok(redirect(format!("/p/{}/config", urlenc(proj))));
+        }
+        ["settings", "telemetry"] => {
+            let act = form_get(form, "action").unwrap_or_default();
+            if matches!(act.as_str(), "on" | "off" | "never") { let _ = run_vigil(db, &["telemetry", &act]); }
+            return Ok(redirect("/settings".into()));
+        }
+        // --- fast, direct store mutations ---
         ["p", proj, "incident", id, "feedback"] => {
             let id: i64 = id.parse().unwrap_or(0);
             let verdict = form_get(form, "verdict").unwrap_or_default();
@@ -327,11 +454,14 @@ fn page_portfolio(store: &Store) -> Result<String> {
             esc(&preview(top.as_deref().unwrap_or("healthy — no open incidents"), 70))
         ));
     }
-    if projects.is_empty() { cards.push_str("<div class=empty>No projects — <code>vigil project add</code>.</div>"); }
+    if projects.is_empty() { cards.push_str("<div class=empty>No projects yet — add one below.</div>"); }
+    let addform = "<h2>Add a project</h2><form method=post action=/projects/add class=card>\
+<div class=ask><input name=name placeholder=\"project name (your system)\"><input name=path placeholder=\"/path/to/logs/web.log\"><button class=\"btn pri\" type=submit>+ Add project</button></div>\
+<p class=sub style=\"margin:0\">A project = one system; add its other containers as sources after.</p></form>";
     let body = format!(
         "<h1>Portfolio</h1><p class=sub>every system VigilAI watches · one control plane, isolated projects</p>\
 <div class=stats><div class=stat><b>{}</b><span>projects</span></div><div class=stat><b>{events}</b><span>events</span></div>\
-<div class=stat><b>{open}</b><span>open incidents</span></div></div><div class=pgrid>{cards}</div>",
+<div class=stat><b>{open}</b><span>open incidents</span></div></div><div class=pgrid>{cards}</div>{addform}",
         projects.len()
     );
     Ok(shell("proj", "portfolio", "Portfolio", &body))
@@ -365,9 +495,20 @@ fn page_all_incidents(store: &Store) -> Result<String> {
     }
     all.sort_by(|a, b| sev_rank(&a.1.severity).cmp(&sev_rank(&b.1.severity)).then(b.1.count.cmp(&a.1.count)));
     let open = all.iter().filter(|(_, i)| i.status == "open").count();
+    // per-project cards (like the portfolio) — click → that project's incidents
+    let mut cards = String::new();
+    for pr in store.list_projects()? {
+        let (o, top) = store.open_incident_count(&pr.name)?;
+        let cls = if o > 0 { "pcard alert" } else { "pcard" };
+        let hd = if o > 0 { "err" } else { "ok" };
+        cards.push_str(&format!(
+            "<a class=\"{cls}\" href=\"/p/{}/incidents\"><div class=ph><span class=\"hd {hd}\"></span><span class=pn>{}</span><span class=env>{} open</span></div><div class=sub style=\"margin:6px 0 0\">{}</div></a>",
+            urlenc(&pr.name), esc(&pr.name), o, esc(&preview(top.as_deref().unwrap_or("healthy"), 64))));
+    }
     let body = format!(
-        "<h1>Incidents · all projects</h1><p class=sub>every open incident across the portfolio · click a row to investigate</p>\
-<div class=stats><div class=stat><b>{open}</b><span>open</span></div><div class=stat><b>{}</b><span>total</span></div></div>{}",
+        "<h1>Incidents · all projects</h1><p class=sub>open incidents grouped by project — click a project, or a row below to investigate</p>\
+<div class=stats><div class=stat><b>{open}</b><span>open</span></div><div class=stat><b>{}</b><span>total</span></div></div>\
+<div class=pgrid style=\"margin-bottom:18px\">{cards}</div><h2>All incidents</h2>{}",
         all.len(), incidents_table(store, &all, true)
     );
     Ok(shell("inc", "incidents · all", "Incidents", &body))
@@ -376,18 +517,25 @@ fn page_all_incidents(store: &Store) -> Result<String> {
 fn sev_rank(s: &str) -> u8 { match s { "SEV1" => 1, "SEV2" => 2, "SEV3" => 3, _ => 4 } }
 
 fn page_all_sources(store: &Store) -> Result<String> {
+    let mut cards = String::new();
     let mut rows = String::new();
     let mut n = 0;
     for pr in store.list_projects()? {
-        for s in store.list_sources(&pr.name)? {
+        let srcs = store.list_sources(&pr.name)?;
+        cards.push_str(&format!(
+            "<a class=pcard href=\"/p/{}/sources\"><div class=ph><span class=\"hd ok\"></span><span class=pn>{}</span><span class=env>{} src</span></div></a>",
+            urlenc(&pr.name), esc(&pr.name), srcs.len()));
+        for s in srcs {
             n += 1;
             rows.push_str(&format!(
-                "<div class=srcrow><span class=pill green>watching</span><span class=nm>{}</span><span class=pr><a href=\"/p/{}\">{}</a></span></div>",
+                "<div class=srcrow><span class=\"pill green\">watching</span><span class=nm>{}</span><span class=pr><a href=\"/p/{}/sources\">{}</a></span></div>",
                 esc(&s), urlenc(&pr.name), esc(&pr.name)));
         }
     }
     if n == 0 { rows.push_str("<div class=empty>No sources.</div>"); }
-    let body = format!("<h1>Sources · all projects</h1><p class=sub>every watched log stream · {n} across the portfolio</p>{rows}");
+    let body = format!(
+        "<h1>Sources · all projects</h1><p class=sub>watched log streams grouped by project · {n} total · click a project to manage</p>\
+<div class=pgrid style=\"margin-bottom:18px\">{cards}</div><h2>All sources</h2>{rows}");
     Ok(shell("src", "sources · all", "Sources", &body))
 }
 
@@ -395,8 +543,8 @@ fn page_all_explore(store: &Store) -> Result<String> {
     let mut rows = String::new();
     for pr in store.list_projects()? {
         for r in store.load_policy(&pr.name)?.into_iter().take(20) {
-            rows.push_str(&format!("<tr><td class=mono>{}</td><td><span class=\"pill {}\">{}</span></td><td class=sig title=\"{}\">{}</td></tr>",
-                esc(&pr.name), route_pill(r.route.as_str()), r.route.as_str(), esc(&r.signature), esc(&preview(&r.signature, 100))));
+            rows.push_str(&format!("<tr><td class=mono>{}</td><td><span class=\"pill {}\">{}</span></td><td>{}</td></tr>",
+                esc(&pr.name), route_pill(r.route.as_str()), r.route.as_str(), tpl_details(&r.signature)));
         }
     }
     if rows.is_empty() { rows.push_str("<tr><td colspan=3 class=empty>No templates yet.</td></tr>"); }
@@ -442,21 +590,34 @@ fn page_all_patches(store: &Store) -> Result<String> {
     Ok(shell("pat", "patches · all", "Patches", &body))
 }
 
-fn page_ask(store: &Store, answer: Option<&str>) -> Result<String> {
-    // Read-only NL surface: render the context + the exact CLI to run (a live
-    // web ask would spend an engine call per request — kept to the CLI/daemon).
+fn page_ask(store: &Store, question: Option<&str>, project: Option<&str>, answer: Option<(bool, String)>) -> Result<String> {
+    let projects = store.list_projects()?;
+    let opts: String = projects.iter().map(|p| {
+        let sel = if Some(p.name.as_str()) == project { " selected" } else { "" };
+        format!("<option{sel}>{}</option>", esc(&p.name))
+    }).collect();
+    let qval = question.map(esc).unwrap_or_default();
+    let ans = match answer {
+        Some((ok, out)) => {
+            let cls = if ok { "" } else { "bad" };
+            format!("<div class=card><div class=sub>Q: {}</div><div class=\"cause cause2\">{}</div></div>",
+                esc(question.unwrap_or("")),
+                if ok { format_cause(&out) } else { format!("<div class=flash {cls}>{}</div>", esc(&out)) })
+        }
+        None => String::new(),
+    };
     let mut ctx = String::new();
-    for pr in store.list_projects()? {
+    for pr in &projects {
         let (o, top) = store.open_incident_count(&pr.name)?;
-        ctx.push_str(&format!("<tr><td class=mono>{}</td><td class=n>{}</td><td class=sig title=\"{}\">{}</td></tr>",
-            esc(&pr.name), o, esc(top.as_deref().unwrap_or("")), esc(&preview(top.as_deref().unwrap_or("—"), 90))));
+        ctx.push_str(&format!("<tr><td class=mono><a href=\"/p/{}\">{}</a></td><td class=n>{}</td><td class=sig title=\"{}\">{}</td></tr>",
+            urlenc(&pr.name), esc(&pr.name), o, esc(top.as_deref().unwrap_or("")), esc(&preview(top.as_deref().unwrap_or("—"), 90))));
     }
-    let ans = answer.map(|a| format!("<div class=card><div class=cause>{}</div></div>", esc(a))).unwrap_or_default();
     let body = format!(
-        "<h1>Ask VigilAI</h1><p class=sub>natural-language questions over your incidents — grounded &amp; cited</p>\
-<form class=ask method=get action=/ask><input name=q placeholder=\"why are 502s up since the deploy?\" value=\"\"><button class=\"btn pri\" type=submit>Ask</button></form>\
-{ans}<p class=sub>The answer runs on your chosen engine. From a shell: <code>vigil ask \"…\" --project &lt;name&gt;</code></p>\
-<h2>Current context</h2><div class=tablewrap><table><colgroup><col class=md><col class=sm><col class=sigcol></colgroup>\
+        "<h1>Ask VigilAI</h1><p class=sub>natural-language questions over your incidents — runs on your engine, grounded &amp; cited</p>\
+<form class=ask method=get action=/ask><select name=project>{opts}</select>\
+<input name=q placeholder=\"why are 502s up since the deploy?\" value=\"{qval}\"><button class=\"btn pri\" type=submit>Ask</button></form>\
+{ans}<p class=sub>(Runs <code>vigil ask</code> on the selected project's engine — may take a few seconds.)</p>\
+<h2>Context</h2><div class=tablewrap><table><colgroup><col class=md><col class=sm><col class=sigcol></colgroup>\
 <tr><th>Project</th><th>Open</th><th>Top incident</th></tr>{ctx}</table></div>"
     );
     Ok(shell("ask", "ask", "Ask", &body))
@@ -474,7 +635,11 @@ fn page_settings_sys(store: &Store) -> Result<String> {
         row("Projects", format!("{np}")),
         row("Events stored", format!("{events}")),
         row("Open incidents", format!("{open}")),
-        row("Telemetry", format!("{} <span class=sub>(off by default; no egress unless VIGIL_TELEMETRY_ENDPOINT is set)</span>", esc(&tel))),
+        row("Telemetry", format!("{} &nbsp; \
+<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=on><button class=\"btn gh\" style=\"padding:3px 9px;font-size:11px\">on</button></form> \
+<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=off><button class=btn style=\"padding:3px 9px;font-size:11px\">off</button></form> \
+<form class=inline method=post action=/settings/telemetry><input type=hidden name=action value=never><button class=btn style=\"padding:3px 9px;font-size:11px\">never</button></form> \
+<span class=sub>(off by default; no egress unless VIGIL_TELEMETRY_ENDPOINT is set)</span>", esc(&tel))),
         row("Data plane", "read-only — reads logs &amp; repo; never queries prod DB".into()),
         row("Resource caps", "CPU/mem budget (`vigil run --max-rss-mb`); sheds its own load before the app".into()),
         row("Credential ceiling", "scoped git token only — opens PRs, never deploys".into()),
@@ -500,16 +665,22 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
     } else {
         "<form class=inline method=post action=pause><input type=hidden name=action value=pause><button class=btn>⏸ Pause</button></form>"
     };
+    let act = |a: &str, label: &str, cls: &str| format!(
+        "<form class=inline method=post action=action><input type=hidden name=action value={a}><button class=\"btn {cls}\">{label}</button></form>");
+    let recent_html = if incs.is_empty() { "<tr><td colspan=3 class=empty>healthy</td></tr>".to_string() } else { recent };
     let body = format!(
         "{}<h1>{} <span class=sub>overview</span></h1>\
 <div class=stats><div class=stat><b>{open}</b><span>open</span></div><div class=stat><b>{}</b><span>sources</span></div>\
 <div class=stat><b>{}</b><span>rules</span></div><div class=stat><b>{calls}</b><span>engine calls</span></div>\
 <div class=stat><b>~{toks}</b><span>est tokens</span></div></div>\
-<div class=kv>{} <a class=btn href=\"/p/{}/incidents\">All incidents →</a></div>\
+<h2>Actions</h2><div class=actions>{}{}{}{}{} <a class=btn href=\"/p/{}/incidents\">All incidents →</a></div>\
+<p class=sub>Warm/Sweep/Calibrate/Investigate run the engine — may take a few seconds.</p>\
 <h2>Recent incidents</h2><div class=tablewrap><table><colgroup><col class=sm><col class=sm><col class=sigcol></colgroup>\
 <tr><th>Sev</th><th>Count</th><th>Signature</th></tr>{}</table></div>",
-        subnav(project, "ov", ""), esc(project), srcs.len(), policy.len(), pausebtn, urlenc(project),
-        if incs.is_empty() { "<tr><td colspan=3 class=empty>healthy</td></tr>".into() } else { recent }
+        subnav(project, "ov", ""), esc(project), srcs.len(), policy.len(),
+        act("warm", "⚙ Warm policy", "pri"), act("sweep", "🔎 Sweep", ""),
+        act("investigate", "▶ Investigate once", ""), act("calibrate", "✓ Calibrate", ""),
+        pausebtn, urlenc(project), recent_html
     );
     Ok(shell_proj(project, &body, "Overview"))
 }
@@ -550,8 +721,8 @@ fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<Str
                     let cites = f.citations.split(',').filter(|c| !c.is_empty())
                         .map(|c| format!("<span class=pill>{}</span>", esc(c))).collect::<Vec<_>>().join(" ");
                     body.push_str(&format!(
-                        "<div class=card><div class=cause>{}</div><div style=\"margin-top:10px\">confidence {:.2}<div class=confbar><i style=\"width:{}%\"></i></div></div><div class=kv>{}</div></div>",
-                        esc(&f.cause), f.confidence, (f.confidence * 100.0) as i64, cites));
+                        "<div class=card><div class=\"cause cause2\">{}</div><div style=\"margin-top:10px\">confidence {:.2}<div class=confbar><i style=\"width:{}%\"></i></div></div><div class=kv>{}</div></div>",
+                        format_cause(&f.cause), f.confidence, (f.confidence * 100.0) as i64, cites));
                 }
                 _ => body.push_str("<div class=card><div class=empty>No engine finding (deterministic detection only, or muted/watched).</div></div>"),
             }
@@ -620,6 +791,11 @@ fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<Str
     Ok(shell_proj(project, &body, &format!("incident {id}")))
 }
 
+/// A clickable, expandable template cell — preview by default, full text on click.
+fn tpl_details(sig: &str) -> String {
+    format!("<details class=tpl><summary>{}</summary><pre>{}</pre></details>", esc(&preview(sig, 110)), esc(sig))
+}
+
 fn render_diff(patch: &str) -> String {
     let mut out = String::from("<pre class=diff>");
     for l in patch.lines() {
@@ -638,8 +814,8 @@ fn page_sources(store: &Store, project: &str) -> Result<String> {
     let scope = "<span class=scope><a class=on href=#>this project</a><a href=/sources>all projects</a></span>";
     let body = format!(
         "{}<h1>{} · sources</h1><p class=sub>this system's containers/services — one project, many sources</p>{rows}\
-<p class=sub style=\"margin-top:12px\">Add more: <code>vigil project add-source {} &lt;path&gt;</code></p>",
-        subnav(project, "src", scope), esc(project), esc(project)
+<form method=post action=sources/add><div class=ask><input name=path placeholder=\"/path/to/another/container.log\"><button class=\"btn pri\" type=submit>+ Add source</button></div></form>",
+        subnav(project, "src", scope), esc(project)
     );
     Ok(shell_proj(project, &body, "Sources"))
 }
@@ -647,15 +823,16 @@ fn page_sources(store: &Store, project: &str) -> Result<String> {
 fn page_explore(store: &Store, project: &str) -> Result<String> {
     let policy = store.load_policy(project)?;
     let mut tpl = String::new();
-    for r in policy.iter().take(60) {
-        tpl.push_str(&format!("<tr><td><span class=\"pill {}\">{}</span></td><td class=sig title=\"{}\">{}</td></tr>",
-            route_pill(r.route.as_str()), r.route.as_str(), esc(&r.signature), esc(&preview(&r.signature, 110))));
+    for r in policy.iter().take(80) {
+        tpl.push_str(&format!(
+            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}</td></tr>",
+            route_pill(r.route.as_str()), r.route.as_str(), tpl_details(&r.signature)));
     }
     if policy.is_empty() { tpl.push_str("<tr><td colspan=2 class=empty>No templates yet.</td></tr>"); }
     let scope = "<span class=scope><a class=on href=#>this project</a><a href=/explore>all projects</a></span>";
     let body = format!(
-        "{}<h1>{} · explore</h1><p class=sub>mined templates &amp; their routes · ask in NL on <a href=/ask>Ask</a></p>\
-<div class=tablewrap><table><colgroup><col class=sm><col class=sigcol></colgroup><tr><th>Route</th><th>Template</th></tr>{tpl}</table></div>",
+        "{}<h1>{} · explore</h1><p class=sub>mined templates &amp; their routes · click a template to expand · ask in NL on <a href=/ask>Ask</a></p>\
+<div class=tablewrap><table><colgroup><col class=sm><col class=sigcol></colgroup><tr><th>Route</th><th>Template (click to expand)</th></tr>{tpl}</table></div>",
         subnav(project, "exp", scope), esc(project)
     );
     Ok(shell_proj(project, &body, "Explore"))
@@ -671,9 +848,9 @@ fn page_rules(store: &Store, project: &str) -> Result<String> {
             "<form class=inline method=post action=\"/p/{}/rules\"><input type=hidden name=template value=\"{}\"><input type=hidden name=sig value=\"{}\"><input type=hidden name=route value=\"{to}\"><button class=\"btn {cls}\" style=\"padding:3px 8px;font-size:11px\">{label}</button></form>",
             urlenc(project), esc(&r.template_id), esc(&r.signature));
         rows.push_str(&format!(
-            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}{sug}</td><td class=sig title=\"{}\">{}</td>\
+            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}{sug}</td><td>{}</td>\
 <td>{}{}{}</td></tr>",
-            route_pill(r.route.as_str()), r.route.as_str(), esc(&r.source), esc(&r.signature), esc(&preview(&r.signature, 80)),
+            route_pill(r.route.as_str()), r.route.as_str(), esc(&r.source), tpl_details(&r.signature),
             btn("escalate", "escalate", "dn"), btn("watch", "watch", ""), btn("mute", "mute", "gh")));
     }
     if policy.is_empty() { rows.push_str("<tr><td colspan=4 class=empty>No rules — run <code>vigil warm</code>.</td></tr>"); }
@@ -690,21 +867,26 @@ fn page_config(store: &Store, project: &str) -> Result<String> {
     let pr = store.get_project(project)?;
     let (calls, toks) = store.usage(project)?;
     let row = |k: &str, v: String| format!("<div class=setrow><b>{}</b><span class=v>{}</span></div>", k, v);
+    let opt = |val: &str, cur: &str| { let s = if val == cur { " selected" } else { "" }; format!("<option{s}>{val}</option>") };
     let body = match pr {
-        Some(p) => format!(
-            "{}<h1>{} · Config</h1><p class=sub>per-project settings · overrides the portfolio defaults</p>\
-<h2>Engine &amp; authority</h2><div class=card>{}{}{}</div>\
-<h2>Code &amp; sources</h2><div class=card>{}{}</div>\
+        Some(p) => {
+            let eng_opts: String = ["claude-cli", "cursor-cli", "anthropic-api", "local", "none"].iter().map(|e| opt(e, &p.engine)).collect();
+            let auto_opts: String = ["notify", "report", "propose", "merge", "release"].iter().map(|a| opt(a, &p.autonomy)).collect();
+            format!(
+                "{}<h1>{} · Config</h1><p class=sub>per-project settings · editable here · overrides the portfolio defaults</p>\
+<form method=post action=config><div class=card>\
+<div class=setrow><b>Engine</b><select name=engine class=v>{}</select></div>\
+<div class=setrow><b>Autonomy</b><select name=autonomy class=v>{}</select></div>\
+<div class=setrow><b>Min confidence</b><input class=v name=min_confidence value=\"{:.2}\" style=\"width:90px;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
+<div class=setrow><b>Repo @ SHA</b><input class=v name=repo value=\"{}\" placeholder=\"/path/to/repo\" style=\"flex:1;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
+<div class=actions style=\"margin-top:12px\"><button class=\"btn pri\" type=submit>Save config</button></div></div></form>\
 <h2>Context &amp; usage</h2><div class=card>{}{}</div>",
-            subnav(project, "cfg", ""), esc(project),
-            row("Engine", format!("{} <span class=sub>(inherit/override)</span>", esc(&p.engine))),
-            row("Autonomy", format!("{} <span class=sub>(notify→report→propose→merge→release · per env)</span>", esc(&p.autonomy))),
-            row("Min confidence", format!("{:.2}", p.min_confidence)),
-            row("Repo @ SHA", esc(p.repo.as_deref().unwrap_or("— (not connected)"))),
-            row("Sources", format!("{}", store.list_sources(project)?.len())),
-            row("vigil.md", "project context the engine reads (like CLAUDE.md) — place a vigil.md in the repo".into()),
-            row("Engine usage", format!("{calls} calls · ~{toks} est tokens")),
-        ),
+                subnav(project, "cfg", ""), esc(project), eng_opts, auto_opts, p.min_confidence,
+                esc(p.repo.as_deref().unwrap_or("")),
+                row("Sources", format!("{} · <a href=\"/p/{}/sources\">manage</a>", store.list_sources(project)?.len(), urlenc(project))),
+                row("Engine usage", format!("{calls} calls · ~{toks} est tokens")),
+            )
+        }
         None => format!("{}<h1>{} · Config</h1><div class=empty>Project not registered.</div>", subnav(project, "cfg", ""), esc(project)),
     };
     Ok(shell_proj(project, &body, "Config"))
@@ -722,11 +904,16 @@ pub fn tui(db: &str, project: &str, interval: u64, once: bool) -> Result<()> {
     Ok(())
 }
 
-/// 32-hex random token from the OS CSPRNG (no extra deps).
+/// A complex 64-hex (32-byte) random token from the OS CSPRNG — Jupyter-strength.
 fn gen_token() -> String {
-    let mut b = [0u8; 16];
+    let mut b = [0u8; 32];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         let _ = f.read_exact(&mut b);
+    }
+    // mix in time+pid so a short read can't yield a weak/all-zero token
+    let salt = format!("{:?}{}", std::time::SystemTime::now(), std::process::id());
+    for (i, byte) in salt.bytes().enumerate() {
+        b[i % 32] ^= byte;
     }
     b.iter().map(|x| format!("{:02x}", x)).collect()
 }
@@ -810,7 +997,7 @@ pub fn serve(db: &str, project: &str, port: u16, token_arg: Option<String>) -> R
         }
 
         let store = Store::open(db)?;
-        let resp = route(&store, project, method, path, form).unwrap_or_else(|e| {
+        let resp = route(&store, db, project, method, path, form).unwrap_or_else(|e| {
             html(format!("<h1>error</h1><pre>{}</pre>", esc(&e.to_string())))
         });
         let head = match &resp.location {
