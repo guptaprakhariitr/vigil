@@ -40,8 +40,14 @@ Prefer to do it by hand? Continue below. (Onboarding pattern inspired by
 ```bash
 # macOS (Apple silicon) example — see Releases for your platform/asset name
 curl -fsSL -o vigil https://github.com/guptaprakhariitr/vigil/releases/latest/download/vigil-aarch64-apple-darwin
-chmod +x vigil && ./vigil --version
+chmod +x vigil
+
+# put it on your PATH so `vigil` works from anywhere
+sudo mv vigil /usr/local/bin/vigil      # or: mkdir -p ~/.local/bin && mv vigil ~/.local/bin/
+vigil --version
 ```
+Linux x86_64: swap the asset for `vigil-x86_64-unknown-linux-gnu`. If `~/.local/bin` isn't already on
+your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zshrc` / `~/.bashrc`).
 **Or run anywhere** with Docker / Compose / Helm — see [docs/REFERENCE.md](docs/REFERENCE.md#deploy).
 
 The macOS binary is **Developer ID–signed and notarized by Apple** (Team `86F7TVY8RD`, hardened

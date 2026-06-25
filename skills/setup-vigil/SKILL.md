@@ -22,8 +22,13 @@ Work through these steps with the user, confirming before anything that creates 
 
 ## 2. Get `vigil`
 - **Download the released binary** for the user's platform from
-  https://github.com/guptaprakhariitr/vigil/releases (the engine is bundled in). `chmod +x` it and
-  put it on PATH. Pick the asset matching `uname -sm` (e.g. `vigil-aarch64-apple-darwin`).
+  https://github.com/guptaprakhariitr/vigil/releases (the engine is bundled in). Pick the asset
+  matching `uname -sm` (e.g. `vigil-aarch64-apple-darwin`, `vigil-x86_64-unknown-linux-gnu`), then
+  make it executable and **put it on PATH** so `vigil` runs from anywhere:
+  ```
+  chmod +x vigil
+  sudo mv vigil /usr/local/bin/vigil    # or: mkdir -p ~/.local/bin && mv vigil ~/.local/bin/ (ensure it's on PATH)
+  ```
 - Or use the container image per `docs/REFERENCE.md` (Deploy).
 - Do NOT try to `cargo build` from this public repo — it depends on the private `vigil-engine` crate;
   source builds are maintainer-only.
