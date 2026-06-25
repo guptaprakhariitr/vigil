@@ -1,0 +1,184 @@
+<!doctype html><html lang=en><head>
+<meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>VigilAI — the on-call engineer that runs on your own box</title>
+<meta name=description content="Self-hosted, BYO-engine root-cause autopilot. Reads the logs you already have, finds the cited root cause, opens a validated fix PR — on your infra, your engine, your autonomy.">
+<style>
+:root{
+ --ground:#14110D;--panel:#1E1A14;--panel2:#262119;--line:#3A3327;--text:#F2EBDD;--muted:#A89C86;
+ --accent:#F4A340;--accent2:#3FB8A0;--danger:#E8674B;
+ --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}html{scroll-behavior:smooth}
+body{margin:0;background:var(--ground);color:var(--text);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+.mono{font-family:var(--mono)}
+/* nav */
+nav{position:sticky;top:0;z-index:10;background:rgba(20,17,13,.82);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav .row{display:flex;align-items:center;gap:18px;height:58px;max-width:1080px;margin:0 auto;padding:0 22px}
+nav .logo{display:flex;align-items:center;gap:8px;font-weight:800;font-size:16px}
+nav .logo .dot{color:var(--accent)}
+nav .sp{flex:1}
+nav a.l{color:var(--muted);font-size:13.5px}nav a.l:hover{color:var(--text)}
+@media(max-width:640px){nav a.l{display:none}}
+.btn{display:inline-flex;align-items:center;gap:7px;font-weight:600;font-size:13.5px;border-radius:9px;padding:9px 16px;border:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#1a1408}
+.btn.pri:hover{filter:brightness(1.06)}
+.star{font-family:var(--mono);font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+/* hero */
+.hero{text-align:center;padding:70px 0 30px;position:relative;overflow:hidden}
+.hero::before{content:"";position:absolute;inset:-40% 0 auto 0;height:420px;background:radial-gradient(60% 70% at 50% 0,rgba(244,163,64,.16),transparent 70%);pointer-events:none}
+.kick{display:inline-block;font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);border:1px solid var(--line);border-radius:999px;padding:5px 13px;margin-bottom:22px}
+h1{font-size:clamp(34px,6vw,62px);line-height:1.02;letter-spacing:-.025em;margin:0 0 18px;font-weight:800}
+h1 .em{color:var(--accent)}
+.lede{color:var(--muted);font-size:17px;max-width:62ch;margin:0 auto 26px}
+.lede b{color:var(--text)}
+/* install bar */
+.install{max-width:680px;margin:0 auto;display:flex;gap:0;border:1px solid var(--line);border-radius:11px;background:#0E0B07;overflow:hidden;font-family:var(--mono);font-size:13px}
+.install .p{color:var(--accent2);padding:13px 0 13px 15px;flex:none}
+.install code{flex:1;color:var(--text);padding:13px 10px;white-space:nowrap;overflow-x:auto;background:none}
+.install button{border:none;border-left:1px solid var(--line);background:var(--panel2);color:var(--accent);font-family:var(--mono);font-size:12px;padding:0 16px;cursor:pointer}
+.install button:hover{background:#2f2820}
+.cap{font-family:var(--mono);font-size:11.5px;color:#6f6450;margin:12px 0 0}
+/* terminal mock */
+.term{max-width:920px;margin:40px auto 0;border:1px solid var(--line);border-radius:13px;background:#0E0B07;overflow:hidden;box-shadow:0 40px 90px -50px #000}
+.tbar{display:flex;align-items:center;gap:7px;padding:11px 15px;background:#1A1610;border-bottom:1px solid var(--line)}
+.tdot{width:11px;height:11px;border-radius:50%}.tr{background:#ff5f57}.ty{background:#febc2e}.tg{background:#28c840}
+.tname{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:8px}
+.tbody{padding:16px 18px;font-family:var(--mono);font-size:12.5px;line-height:1.85;overflow-x:auto}
+.tbody .row{white-space:nowrap;color:var(--muted)}
+.tbody .lv{display:inline-block;width:54px}
+.lv.e{color:var(--danger)}.lv.w{color:var(--accent)}.lv.i{color:var(--accent2)}
+.tbody .svc{color:#cdbf9c}
+.tbody .verdict{margin-top:12px;padding:12px 14px;border:1px solid var(--line);border-radius:9px;background:rgba(244,163,64,.06);white-space:normal;color:var(--text)}
+.tbody .verdict b{color:var(--accent)}
+.tbody .sev{color:var(--danger);font-weight:700}
+.spark{display:flex;align-items:flex-end;gap:3px;height:30px;margin-top:14px}
+.spark i{flex:1;background:linear-gradient(var(--accent),#7a4d12);border-radius:1px;opacity:.7}
+/* sections */
+section{padding:58px 0;border-top:1px solid var(--line)}
+.eyebrow{text-align:center;font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent2);margin:0 0 10px}
+h2{text-align:center;font-size:clamp(26px,4vw,38px);letter-spacing:-.02em;margin:0 0 8px;font-weight:800}
+.sectsub{text-align:center;color:var(--muted);max-width:60ch;margin:0 auto 34px}
+.grid{display:grid;gap:16px;grid-template-columns:1fr}
+@media(min-width:720px){.grid.c3{grid-template-columns:repeat(3,1fr)}.grid.c2{grid-template-columns:repeat(2,1fr)}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px}
+.card .tag{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent2);margin:0 0 9px}
+.card h3{font-size:16.5px;margin:0 0 8px}
+.card p{color:var(--muted);font-size:14px;margin:0}
+.card .ic{width:30px;height:30px;border-radius:8px;background:rgba(244,163,64,.1);color:var(--accent);display:flex;align-items:center;justify-content:center;font-size:15px;margin-bottom:11px}
+/* cli block */
+.cli{max-width:760px;margin:0 auto;border:1px solid var(--line);border-radius:12px;background:#0E0B07;padding:18px 20px;font-family:var(--mono);font-size:13px;line-height:1.9;overflow-x:auto}
+.cli .c{color:var(--accent)}.cli .cm{color:#6f6450}
+/* CTA */
+.cta{margin:62px auto;max-width:1000px;border-radius:18px;padding:46px 28px;text-align:center;background:linear-gradient(110deg,var(--accent),#f07a59 75%,#ec6f9e);color:#1a1408}
+.cta h2{color:#1a1408}.cta p{color:#4a2e0e;margin:0 0 22px;font-weight:500}
+.cta .btn{background:#1a1408;color:#ffd9a0;border-color:#1a1408}
+/* footer */
+footer{border-top:1px solid var(--line);padding:44px 0 60px;color:var(--muted);font-size:13px}
+.fcols{display:grid;gap:26px;grid-template-columns:2fr 1fr 1fr 1fr}
+@media(max-width:680px){.fcols{grid-template-columns:1fr 1fr}}
+.fcols h4{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:#6f6450;margin:0 0 12px}
+.fcols a{display:block;color:var(--muted);margin:6px 0;font-size:13px}.fcols a:hover{color:var(--text)}
+.fnote{margin-top:34px;font-family:var(--mono);font-size:11px;color:#6f6450}
+</style></head>
+<body>
+
+<nav><div class=row>
+  <span class=logo>◑ vigil<span class=dot>AI</span></span>
+  <span class=sp></span>
+  <a class=l href="#how">How it works</a>
+  <a class=l href="https://github.com/guptaprakhariitr/vigil/tree/main/docs">Docs</a>
+  <a class=l href="https://github.com/guptaprakhariitr/vigil">GitHub</a>
+  <span class=star>v0.1.0 · Apache-2.0</span>
+  <a class="btn pri" href="https://github.com/guptaprakhariitr/vigil#get-started-with-your-coding-agent">Get started</a>
+</div></nav>
+
+<header class=hero><div class=wrap>
+  <span class=kick>Self-hosted · BYO engine · open source</span>
+  <h1>The on-call engineer that<br><span class=em>runs on your own box.</span></h1>
+  <p class=lede>VigilAI reads the logs you already have, finds the root cause, <b>cites the evidence</b>, and opens a validated fix PR — only as far as you allow. <b>Your infra, your engine, your autonomy.</b> No account, no agents in your code, nothing leaves the box except to the engine you pick.</p>
+  <div class=install>
+    <span class=p>›</span>
+    <code id=cmd>npx skills add guptaprakhariitr/vigil --all</code>
+    <button onclick="navigator.clipboard&&navigator.clipboard.writeText(document.getElementById('cmd').textContent);this.textContent='Copied'">Copy</button>
+  </div>
+  <p class=cap>Paste into Claude Code or Cursor — it clones the repo, reads the docs, and sets VigilAI up for you.</p>
+
+  <div class=term>
+    <div class=tbar><span class="tdot tr"></span><span class="tdot ty"></span><span class="tdot tg"></span><span class=tname>vigil up · payments</span></div>
+    <div class=tbody>
+      <div class=row><span class="lv w">WARN</span> <span class=svc>payments</span> stripe client retry 1/3 · timeout after 2000ms</div>
+      <div class=row><span class="lv e">ERROR</span> <span class=svc>payments</span> UnhandledRejection: cannot read 'id' of undefined at charge.ts:9</div>
+      <div class=row><span class="lv e">ERROR</span> <span class=svc>gateway</span> 502 upstream POST /api/charge · tenant=acme,globex (×214)</div>
+      <div class=verdict>
+        <span class=sev>SEV-2</span> &nbsp;214 errors → <b>1 incident</b> &nbsp;→&nbsp;
+        Cause: deploy <b>a3f9c1</b> made <span class=mono style="color:#cdbf9c">charge()</span> read <span class=mono style="color:#cdbf9c">session.customer.id</span>; <span class=mono style="color:#cdbf9c">session</span> is undefined when Stripe times out (conf 0.94).
+        &nbsp;→&nbsp; Patch <b>validated</b> · 3 tests pass · branch <span class=mono style="color:#cdbf9c">vigil/fix-…</span>
+      </div>
+      <div class=spark id=spark></div>
+    </div>
+  </div>
+</div></header>
+
+<section id=budget><div class=wrap>
+  <p class=eyebrow>Tiered cognition</p>
+  <h2>Coverage never cut by budget</h2>
+  <p class=sectsub>Cheap work stays cheap. The deterministic core runs hot at zero tokens; the engine is one constrained, cited hop — only when a real incident is novel.</p>
+  <div class="grid c3">
+    <div class=card><p class=tag>Tier 0</p><h3>Deterministic core</h3><p>Parse, template-mine, correlate and detect on every line — sub-millisecond, no model, fully on box.</p></div>
+    <div class=card><p class=tag>Tier 1</p><h3>Local triage policy</h3><p>A per-project mute / watch / escalate table the engine <i>authors</i> once and refines from feedback. Runs hot, zero tokens, auditable.</p></div>
+    <div class=card><p class=tag>Tier 2</p><h3>Your frontier engine</h3><p>One grounded call on a novel escalation → a cited root cause + a validated patch. Claude · Cursor · API · local.</p></div>
+  </div>
+</div></section>
+
+<section id=how><div class=wrap>
+  <p class=eyebrow>Why it's different</p>
+  <h2>A deterministic core the model can't fake</h2>
+  <p class=sectsub>Evidence is assembled by code, not narrated by a prompt. The engine proposes; the engine validates.</p>
+  <div class="grid c2">
+    <div class=card><div class=ic>◆</div><h3>Model only proposes</h3><p>The deterministic engine assembles cited evidence and validates patches. The model suggests — it never decides.</p></div>
+    <div class=card><div class=ic>❝</div><h3>Cited or it abstains</h3><p>Every claim links back to the log cluster, stack frame, or diff it came from. Thin evidence → it abstains, with a reason.</p></div>
+    <div class=card><div class=ic>↧</div><h3>Patches that pass tests</h3><p>Fixes are applied in a throwaway git worktree off your deployed SHA, tested, and secret-scanned — never your working copy.</p></div>
+    <div class=card><div class=ic>≈</div><h3>Token economy</h3><p>Thousands of log lines and hundreds of recurrences collapse to one incident and a couple of engine calls. Healthy services cost nothing.</p></div>
+    <div class=card><div class=ic>↻</div><h3>Self-correcting</h3><p>Accept/reject teaches the policy; eval-gated calibration sharpens it on a schedule and can never weaken detection recall.</p></div>
+    <div class=card><div class=ic>⛉</div><h3>Do no harm</h3><p>Read-only data plane, resource-capped, sandboxed validation. Its credential ceiling is a scoped git token — it never deploys.</p></div>
+  </div>
+</div></section>
+
+<section><div class=wrap>
+  <p class=eyebrow>Quickstart</p>
+  <h2>Watching in three commands</h2>
+  <p class=sectsub>A project is one system; add its containers as sources. Pick an engine, set the autonomy, let it run.</p>
+  <div class=cli>
+<span class=cm># register your system and its containers as sources</span><br>
+<span class=c>vigil project add</span> myapp ./logs/web.log --repo .<br>
+<span class=c>vigil project add-source</span> myapp ./logs/worker.log<br>
+<span class=cm># draft the triage policy, then watch — your engine, notify-only to start</span><br>
+<span class=c>vigil warm</span> ./logs/web.log --project myapp<br>
+<span class=c>vigil up</span> --project myapp --engine claude-cli --autonomy notify
+  </div>
+</div></section>
+
+<div class=cta>
+  <h2>Put your on-call on autopilot</h2>
+  <p>Self-hosted · BYO engine · Apache-2.0 · no code changes, no account.</p>
+  <a class=btn href="https://github.com/guptaprakhariitr/vigil#get-started-with-your-coding-agent">Get started</a>
+</div>
+
+<footer><div class=wrap>
+  <div class=fcols>
+    <div><span class=logo>◑ vigil<span class=dot>AI</span></span><p style="max-width:34ch;margin:12px 0 0">The on-call engineer that runs on your own box.</p></div>
+    <div><h4>Product</h4><a href="#how">How it works</a><a href="https://github.com/guptaprakhariitr/vigil/blob/main/docs/REFERENCE.md">Reference</a><a href="https://github.com/guptaprakhariitr/vigil/releases">Releases</a></div>
+    <div><h4>Resources</h4><a href="https://github.com/guptaprakhariitr/vigil/blob/main/docs/HOW-IT-WORKS.md">How it works</a><a href="https://github.com/guptaprakhariitr/vigil/blob/main/docs/SECURITY.md">Security</a><a href="https://github.com/guptaprakhariitr/vigil/tree/main/deploy">Deploy</a></div>
+    <div><h4>Company</h4><a href="https://github.com/guptaprakhariitr/vigil">GitHub</a><a href="https://github.com/guptaprakhariitr/vigil/blob/main/LICENSE">License</a></div>
+  </div>
+  <p class=fnote>© VigilAI · Apache-2.0 · self-hosted, BYO engine. Run it where your code and logs already are.</p>
+</div></footer>
+
+<script>
+// tiny spark bars (deterministic, no deps)
+var s=document.getElementById('spark'),h=[6,8,5,9,7,12,8,6,10,14,9,7,11,8,6,9,13,8,7,10,6,9,8,12,7,9,6,10,8,7];
+s.innerHTML=h.map(function(v){return '<i style="height:'+(v*6)+'%"></i>'}).join('');
+</script>
+</body></html>
