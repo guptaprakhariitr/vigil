@@ -214,6 +214,12 @@ function poll(){fetch(location.pathname+location.search+'&poll=1').then(function
  }else{setTimeout(poll,1500)}}).catch(function(){setTimeout(poll,2000)})}
 setTimeout(poll,1000);})();</script>"#;
 
+const RUNACT_JS: &str = r#"<script>function runAct(a,btn){var o=document.getElementById('actout');var ot=btn.textContent;btn.disabled=true;btn.textContent='Running…';
+o.innerHTML='<div class=thinking><span class=sh></span><span>Running '+a+'…</span><span class=dots></span></div>';
+fetch(location.pathname.replace(/\/$/,'')+'/action',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action='+encodeURIComponent(a)})
+.then(function(r){return r.text()}).then(function(t){o.innerHTML=t;btn.disabled=false;btn.textContent=ot;})
+.catch(function(e){o.innerHTML='<div class="flash bad">'+e+'</div>';btn.disabled=false;btn.textContent=ot;});}</script>"#;
+
 const SPRITE: &str = r##"<svg width="0" height="0" style="position:absolute" aria-hidden="true">
 <symbol id="i-proj" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></symbol>
 <symbol id="i-inc" viewBox="0 0 24 24"><path d="M12 4 L21 19 H3 Z"/><path d="M12 10v4"/><path d="M12 17h.01"/></symbol>
@@ -440,7 +446,12 @@ fn handle_post(store: &Store, db: &str, p: &[&str], form: &str) -> Result<Resp> 
             };
             let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             let (ok, out) = run_vigil(db, &argrefs);
-            return Ok(action_result(title, ok, &out, &back));
+            let _ = (title, back);
+            // in-page fragment (the Overview JS injects this under the buttons)
+            let cls = if ok { "" } else { "bad" };
+            return Ok(html(format!(
+                "<div class=flash {cls}>{}</div><pre class=out>{}</pre>",
+                if ok { "done" } else { "failed" }, esc(out.trim()))));
         }
         ["p", proj, "config"] => {
             let engine = form_get(form, "engine").unwrap_or_else(|| "claude-cli".into());
@@ -468,12 +479,12 @@ fn handle_post(store: &Store, db: &str, p: &[&str], form: &str) -> Result<Resp> 
                 let reason = "via web UI";
                 if verdict == "accept" {
                     store.set_verdict(id, "accept", reason)?;
-                    store.set_route(proj, &row.fingerprint, &row.signature, "escalate", "feedback")?;
+                    store.set_route(proj, &row.fingerprint, &row.signature, "escalate", "feedback", "you accepted this finding")?;
                     store.set_incident_status(id, "resolved")?;
                     store.audit(proj, id, "feedback", "accept", reason)?;
                 } else if verdict == "reject" {
                     store.set_verdict(id, "reject", reason)?;
-                    store.set_route(proj, &row.fingerprint, &row.signature, "mute", "feedback")?;
+                    store.set_route(proj, &row.fingerprint, &row.signature, "mute", "feedback", "you rejected this as noise")?;
                     store.set_incident_status(id, "dismissed")?;
                     store.audit(proj, id, "feedback", "reject", reason)?;
                 }
@@ -485,7 +496,7 @@ fn handle_post(store: &Store, db: &str, p: &[&str], form: &str) -> Result<Resp> 
             let route = form_get(form, "route").unwrap_or_default();
             let sig = form_get(form, "sig").unwrap_or_default();
             if !tid.is_empty() && matches!(route.as_str(), "mute" | "watch" | "escalate") {
-                store.set_route(proj, &tid, &sig, &route, "manual")?;
+                store.set_route(proj, &tid, &sig, &route, "manual", "set from the UI")?;
             }
             Ok(redirect(format!("/p/{}/rules", urlenc(proj))))
         }
@@ -738,8 +749,9 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
     } else {
         "<form class=inline method=post action=pause><input type=hidden name=action value=pause><button class=btn>⏸ Pause</button></form>"
     };
+    // engine actions resolve in-page (fetch → spinner → result), no new page
     let act = |a: &str, label: &str, cls: &str| format!(
-        "<form class=inline method=post action=action><input type=hidden name=action value={a}><button class=\"btn {cls}\">{label}</button></form>");
+        "<button class=\"btn {cls}\" onclick=\"runAct('{a}',this)\">{label}</button>");
     let recent_html = if incs.is_empty() { "<tr><td colspan=3 class=empty>healthy</td></tr>".to_string() } else { recent };
     let body = format!(
         "{}<h1>{} <span class=sub>overview</span></h1>\
@@ -747,7 +759,8 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
 <div class=stat><b>{}</b><span>rules</span></div><div class=stat><b>{calls}</b><span>engine calls</span></div>\
 <div class=stat><b>~{toks}</b><span>est tokens</span></div></div>\
 <h2>Actions</h2><div class=actions>{}{}{}{}{} <a class=btn href=\"/p/{}/incidents\">All incidents →</a></div>\
-<p class=sub>Warm/Sweep/Calibrate/Investigate run the engine — may take a few seconds.</p>\
+<p class=sub>Warm/Sweep/Calibrate/Investigate run the engine in place — results appear below.</p>\
+<div id=actout></div>{RUNACT_JS}\
 <h2>Recent incidents</h2><div class=tablewrap><table><colgroup><col class=sm><col class=sm><col class=sigcol></colgroup>\
 <tr><th>Sev</th><th>Count</th><th>Signature</th></tr>{}</table></div>",
         subnav(project, "ov", ""), esc(project), srcs.len(), policy.len(),
@@ -920,17 +933,18 @@ fn page_rules(store: &Store, project: &str) -> Result<String> {
         let btn = |to: &str, label: &str, cls: &str| format!(
             "<form class=inline method=post action=\"/p/{}/rules\"><input type=hidden name=template value=\"{}\"><input type=hidden name=sig value=\"{}\"><input type=hidden name=route value=\"{to}\"><button class=\"btn {cls}\" style=\"padding:3px 8px;font-size:11px\">{label}</button></form>",
             urlenc(project), esc(&r.template_id), esc(&r.signature));
+        let reason = if r.reason.is_empty() { String::new() } else { format!("<div class=sub style=\"margin:3px 0 0\">{}</div>", esc(&r.reason)) };
         rows.push_str(&format!(
-            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}{sug}</td><td>{}</td>\
+            "<tr><td><span class=\"pill {}\">{}</span></td><td>{}{sug}</td><td>{}{}</td>\
 <td>{}{}{}</td></tr>",
-            route_pill(r.route.as_str()), r.route.as_str(), esc(&r.source), tpl_details(&r.signature),
+            route_pill(r.route.as_str()), r.route.as_str(), esc(&r.source), tpl_details(&r.signature), reason,
             btn("escalate", "escalate", "dn"), btn("watch", "watch", ""), btn("mute", "mute", "gh")));
     }
     if policy.is_empty() { rows.push_str("<tr><td colspan=4 class=empty>No rules — run <code>vigil warm</code>.</td></tr>"); }
     let body = format!(
         "{}<h1>{} · Rules</h1><p class=sub>engine-authored Tier-1 policy · 0-token hot path · <span class=\"pill blue\">engine</span> = LLM-authored · click to re-route</p>\
 <div class=tablewrap><table><colgroup><col class=sm><col class=md><col class=sigcol><col class=lg></colgroup>\
-<tr><th>Route</th><th>Source</th><th>Template</th><th>Set</th></tr>{rows}</table></div>",
+<tr><th>Route</th><th>Source</th><th>Template &amp; reason</th><th>Set</th></tr>{rows}</table></div>",
         subnav(project, "rules", ""), esc(project)
     );
     Ok(shell_proj(project, &body, "Rules"))

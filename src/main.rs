@@ -855,6 +855,7 @@ fn main() -> Result<()> {
                 .collect();
             eprintln!("· warm-setup: {} templates → 1 engine call ({})", templates.len(), adapter.name());
             let rules = triage::warm_setup(adapter.as_ref(), &project, &context, &templates)?;
+            store.clear_engine_policy(&project)?; // prune stale engine rules; keep manual/feedback
             store.save_policy(&project, &rules)?;
             store.record_usage(&project, "warm-setup", (templates.len() * 60 + 800) as i64)?;
             println!("✓ drafted {} policy rules (review with `vigil policy`):", rules.len());
@@ -885,7 +886,7 @@ fn main() -> Result<()> {
             let hit = known.iter().find(|(id, _)| id.starts_with(&template));
             match hit {
                 Some((id, sig)) => {
-                    store.set_route(&project, id, sig, &Route::parse(&route).as_str(), "manual")?;
+                    store.set_route(&project, id, sig, Route::parse(&route).as_str(), "manual", "set from CLI")?;
                     println!("✓ {} → {}", &id[..id.len().min(12)], Route::parse(&route).as_str());
                 }
                 None => println!("no incident matches template id prefix '{template}'"),
@@ -902,7 +903,7 @@ fn main() -> Result<()> {
                 "accept" => {
                     store.set_verdict(id, "accept", &reason)?;
                     // reinforce: this signature genuinely warrants escalation.
-                    store.set_route(&project, &tid, &sig, Route::Escalate.as_str(), "feedback")?;
+                    store.set_route(&project, &tid, &sig, Route::Escalate.as_str(), "feedback", "you accepted this finding")?;
                     store.set_incident_status(id, "resolved")?;
                     store.audit(&project, id, "feedback", "accept", &reason)?;
                     println!("✓ accepted — incident resolved; '{}' stays escalate (verified-recurring will now suppress it)", short_sig(&sig));
@@ -917,7 +918,7 @@ fn main() -> Result<()> {
                         .map(|r| r.route)
                         .unwrap_or(Route::Escalate);
                     let next = if noise { Route::Mute } else { cur.demote() };
-                    store.set_route(&project, &tid, &sig, next.as_str(), "feedback")?;
+                    store.set_route(&project, &tid, &sig, next.as_str(), "feedback", "you rejected this as noise")?;
                     store.set_incident_status(id, "dismissed")?;
                     store.audit(&project, id, "feedback", "reject", &format!("{} → {}", cur.as_str(), next.as_str()))?;
                     println!("✓ rejected — '{}' demoted {} → {} (won't burn an engine call next time)", short_sig(&sig), cur.as_str(), next.as_str());
