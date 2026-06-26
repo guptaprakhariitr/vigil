@@ -79,6 +79,40 @@ fn preview(s: &str, n: usize) -> String {
     if one.chars().count() > n { format!("{}…", one.chars().take(n).collect::<String>()) } else { one }
 }
 fn sev_pill(s: &str) -> &'static str { match s { "SEV1" | "SEV2" => "red", "SEV3" => "amber", _ => "grey" } }
+fn status_pill(s: &str) -> &'static str { match s { "resolved" => "green", "dismissed" => "grey", _ => "amber" } }
+
+/// Last `max_lines` lines of a file, reading only the tail `max_bytes` so a
+/// multi-GB log never blows memory — the "live source logs to a saved limit".
+fn tail_file(path: &str, max_lines: usize, max_bytes: u64) -> std::io::Result<(u64, String)> {
+    use std::io::Seek;
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    let start = len.saturating_sub(max_bytes);
+    f.seek(std::io::SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)?;
+    let raw = String::from_utf8_lossy(&bytes);
+    // if we seeked mid-line, drop the partial first line
+    let body = if start > 0 { raw.splitn(2, '\n').nth(1).unwrap_or("").to_string() } else { raw.into_owned() };
+    let lines: Vec<&str> = body.lines().collect();
+    let tail = lines.iter().rev().take(max_lines).rev().cloned().collect::<Vec<_>>().join("\n");
+    Ok((len, tail))
+}
+
+/// Real, unmasked sample log lines for a template_id, as an expandable block —
+/// so Evidence shows genuine log text, not just the pruned `<n>/<str>` pattern.
+fn raw_samples_html(store: &Store, project: &str, template_id: &str, n: i64) -> String {
+    match store.sample_events(project, template_id, n) {
+        Ok(rows) if !rows.is_empty() => {
+            let lines: String = rows.iter().map(|(_ts, svc, body)| {
+                let svc = if svc.is_empty() { String::new() } else { format!("[{}] ", esc(svc)) };
+                format!("{svc}{}\n", esc(body.trim_end()))
+            }).collect();
+            format!("<details class=tpl><summary>{} real log line(s) — click to see the actual text</summary><pre>{}</pre></details>", rows.len(), lines)
+        }
+        _ => String::new(),
+    }
+}
 fn route_pill(r: &str) -> &'static str { match r { "escalate" => "red", "watch" => "amber", _ => "grey" } }
 
 /// "active for 2d 4h" from the stored monitoring-since epoch.
@@ -213,6 +247,8 @@ details.tpl pre{margin:0;padding:9px 11px;border-top:1px solid var(--line);font:
 .flash{background:var(--tealbg);border:1px solid #bfe6dd;color:var(--teal);border-radius:9px;padding:10px 13px;margin-bottom:14px;font-size:13px}
 .flash.bad{background:#fde6e0;border-color:#f4c9bd;color:#c2492e}
 pre.out{background:#0E0B07;color:#cdbf9c;border-radius:9px;padding:13px 15px;overflow-x:auto;font:11.5px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word}
+pre.rawlog{background:#0E0B07;color:#d4c9a8;border:1px solid #2a2418;border-radius:7px;padding:8px 11px;margin:0;font:11.5px ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:340px;overflow:auto}
+.help{color:var(--muted);font-size:12px;line-height:1.5;margin:3px 0 0}
 .thinking{display:flex;align-items:center;gap:10px;color:var(--accent);font:13px ui-monospace,monospace;padding:6px 2px}
 .thinking .sh{display:inline-block;width:14px;height:14px;border:2px solid #f0ddb5;border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -231,13 +267,19 @@ function poll(){fetch(location.pathname+location.search+'&poll=1').then(function
  if(d.status==='done'||d.status==='error'){clearInterval(t);
   var th=document.querySelector('.thinking');if(th)th.style.display='none';
   var a=document.getElementById('ans');a.innerHTML=d.html;a.classList.add('show');
-  var b=document.querySelector('button[type=submit]');if(b){b.disabled=false;b.textContent='Ask';}
+  var b=document.getElementById('askbtn');if(b){b.disabled=false;b.textContent='Ask';}
  }else{setTimeout(poll,1500)}}).catch(function(){setTimeout(poll,2000)})}
 setTimeout(poll,1000);})();</script>"#;
 
 const RUNACT_JS: &str = r#"<script>function runAct(a,btn){var o=document.getElementById('actout');var ot=btn.textContent;btn.disabled=true;btn.textContent='Running…';
 o.innerHTML='<div class=thinking><span class=sh></span><span>Running '+a+'…</span><span class=dots></span></div>';
 fetch(location.pathname.replace(/\/$/,'')+'/action',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'action='+encodeURIComponent(a)})
+.then(function(r){return r.text()}).then(function(t){o.innerHTML=t;btn.disabled=false;btn.textContent=ot;})
+.catch(function(e){o.innerHTML='<div class="flash bad">'+e+'</div>';btn.disabled=false;btn.textContent=ot;});}</script>"#;
+
+const ENGTEST_JS: &str = r#"<script>function testEngine(btn){var s=document.querySelector('select[name=engine]');var o=document.getElementById('engtest');var ot=btn.textContent;btn.disabled=true;btn.textContent='Testing…';
+o.innerHTML='<div class=thinking><span class=sh></span><span>Probing '+s.value+'…</span><span class=dots></span></div>';
+fetch(location.pathname.replace(/\/config$/,'')+'/engine-test',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'engine='+encodeURIComponent(s.value)})
 .then(function(r){return r.text()}).then(function(t){o.innerHTML=t;btn.disabled=false;btn.textContent=ot;})
 .catch(function(e){o.innerHTML='<div class="flash bad">'+e+'</div>';btn.disabled=false;btn.textContent=ot;});}</script>"#;
 
@@ -418,7 +460,45 @@ pub fn route(store: &Store, db: &str, default_project: &str, method: &str, path:
                 Some("fix") => "fix",
                 _ => "cause",
             };
-            html(page_incident(store, proj, id.parse().unwrap_or(0), tab)?)
+            let id_n: i64 = id.parse().unwrap_or(0);
+            // Inline "Ask the engine about THIS incident" — same async ask_jobs
+            // machinery as the global Ask, scoped with the incident's signature.
+            if let Some(q) = form_get(query, "ask").filter(|s| !s.is_empty()) {
+                let (sig, sev, cnt) = store.get_incident(proj, id_n)?
+                    .map(|(i, _)| (i.signature, i.severity, i.count)).unwrap_or_default();
+                let full = format!("Regarding this incident [{sev}] \"{}\" (seen ×{cnt}) in project {proj}: {q}", sig);
+                let h = qhash(&full);
+                let st = store.ask_status(proj, &h)?;
+                if form_get(query, "poll").is_some() {
+                    let (status, body_html) = match st {
+                        Some((s, a)) if s == "done" => ("done", format_cause(&a)),
+                        Some((s, a)) if s == "error" => ("error", format!("<div class=flash bad>{}</div>", esc(&a))),
+                        _ => ("running", String::new()),
+                    };
+                    return Ok(Resp { status: 200, ctype: "application/json".into(),
+                        body: serde_json::json!({"status": status, "html": body_html}).to_string(), location: None });
+                }
+                let state = match st {
+                    Some((s, a)) if s == "done" => AskState::Done(true, a),
+                    Some((s, a)) if s == "error" => AskState::Done(false, a),
+                    _ => {
+                        if store.ask_begin(proj, &h, &full)? {
+                            let (db2, pr2, h2, full2) = (db.to_string(), proj.to_string(), h.clone(), full.clone());
+                            std::thread::spawn(move || {
+                                let (ok, out) = run_vigil(&db2, &["ask", &full2, "--project", &pr2]);
+                                if let Ok(s) = Store::open(&db2) { let _ = s.ask_finish(&pr2, &h2, &out, ok); }
+                            });
+                        }
+                        AskState::Running
+                    }
+                };
+                return Ok(html(page_incident(store, proj, id_n, "cause", Some(&q), state)?));
+            }
+            html(page_incident(store, proj, id_n, tab, None, AskState::None)?)
+        }
+        ["p", proj, "source"] => {
+            let path = form_get(query, "path").unwrap_or_default();
+            html(page_source(store, proj, &path)?)
         }
         ["p", proj, "sources"] => html(page_sources(store, proj)?),
         ["p", proj, "explore"] => html(page_explore(store, proj, page_of(query))?),
@@ -476,6 +556,16 @@ fn handle_post(store: &Store, db: &str, p: &[&str], form: &str) -> Result<Resp> 
             return Ok(html(format!(
                 "<div class=flash {cls}>{}</div><pre class=out>{}</pre>",
                 if ok { "done" } else { "failed" }, esc(out.trim()))));
+        }
+        ["p", proj, "engine-test"] => {
+            // Probe the selected engine for reachability/auth (no prompt spent),
+            // returning an in-page fragment: connected ✓ or failed ✗ with the reason.
+            let engine = form_get(form, "engine").unwrap_or_else(|| "claude-cli".into());
+            let (ok, out) = run_vigil(db, &["engine", "check", "--engine", &engine, "--project", proj]);
+            let cls = if ok { "" } else { "bad" };
+            let label = if ok { "connected" } else { "not connected" };
+            return Ok(html(format!(
+                "<div class=flash {cls}><b>{}</b> — {}</div>", label, esc(out.trim()))));
         }
         ["p", proj, "config"] => {
             let engine = form_get(form, "engine").unwrap_or_else(|| "claude-cli".into());
@@ -781,6 +871,12 @@ It's read-only and never deploys.</p></div>\
 <li><b>Warm</b> the policy once (project Overview → ⚙ Warm policy), skim Rules.</li>\
 <li>Let it run. Review incidents; <b>Accept</b> real ones, <b>Reject</b> noise. <b>Ask</b> questions in English.</li></ol></div>\
 <h2>The autonomy dial</h2><div class=card>{}{}{}{}{}</div>\
+<h2>Severity (SEV)</h2><div class=card>\
+<p style=\"margin:0 0 8px;line-height:1.6\">Severity is computed deterministically from how <b>loud</b> an incident is (its event count) and how <b>wide</b> it is (blast radius = distinct services + tenants hit). Lower number = more serious.</p>\
+<div class=setrow><b style=\"min-width:60px;display:inline-block\"><span class=\"pill red\">SEV1</span></b><span class=v style=\"flex:1;color:var(--text)\">Critical / reserved — the most severe band (e.g. operator-escalated). VigilAI's auto-detector tops out at SEV2; SEV1 is for the worst, human-confirmed incidents.</span></div>\
+<div class=setrow><b style=\"min-width:60px;display:inline-block\"><span class=\"pill red\">SEV2</span></b><span class=v style=\"flex:1;color:var(--text)\">Major — wide blast (<b>≥3</b> services/tenants) <i>or</i> very loud (<b>≥50</b> occurrences). Page-worthy.</span></div>\
+<div class=setrow><b style=\"min-width:60px;display:inline-block\"><span class=\"pill amber\">SEV3</span></b><span class=v style=\"flex:1;color:var(--text)\">Elevated — recurring (<b>≥10</b> occurrences) but contained. Worth a look.</span></div>\
+<div class=setrow><b style=\"min-width:60px;display:inline-block\"><span class=\"pill grey\">SEV4</span></b><span class=v style=\"flex:1;color:var(--text)\">Low — a handful of occurrences, narrow blast. Tracked, rarely urgent.</span></div></div>\
 <h2>Glossary</h2><div class=card>{}{}{}{}{}{}{}{}{}{}{}{}</div>\
 <h2>Guarantees</h2><div class=card>{}{}{}</div>",
         uptime_str(store),
@@ -818,8 +914,8 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
     let srcs = store.list_sources(project)?;
     let paused = store.is_paused(project)?;
     let recent = incs.iter().take(5).map(|i| format!(
-        "<tr class=clk onclick=\"location='/p/{}/incident/{}'\"><td><span class=\"pill {}\">{}</span></td><td class=n>{}</td><td class=sig title=\"{}\">{}</td></tr>",
-        urlenc(project), i.id, sev_pill(&i.severity), i.severity, i.count, esc(&i.signature), esc(&preview(&i.signature, 90)))).collect::<String>();
+        "<tr class=clk onclick=\"location='/p/{}/incident/{}'\"><td><span class=\"pill {}\">{}</span></td><td><span class=\"pill {}\">{}</span></td><td class=n>{}</td><td class=sig title=\"{}\">{}</td></tr>",
+        urlenc(project), i.id, sev_pill(&i.severity), i.severity, status_pill(&i.status), esc(&i.status), i.count, esc(&i.signature), esc(&preview(&i.signature, 90)))).collect::<String>();
     let pausebtn = if paused {
         "<form class=inline method=post action=pause title=\"Resume watching this project (scheduler will process it again)\"><input type=hidden name=action value=resume><button class=\"btn gh\" title=\"Resume watching this project\">▶ Resume</button></form>"
     } else {
@@ -828,7 +924,7 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
     // engine actions resolve in-page (fetch → spinner → result), no new page
     let act = |a: &str, label: &str, cls: &str, tip: &str| format!(
         "<button class=\"btn {cls}\" title=\"{tip}\" onclick=\"runAct('{a}',this)\">{label}</button>");
-    let recent_html = if incs.is_empty() { "<tr><td colspan=3 class=empty>healthy</td></tr>".to_string() } else { recent };
+    let recent_html = if incs.is_empty() { "<tr><td colspan=4 class=empty>healthy</td></tr>".to_string() } else { recent };
     let body = format!(
         "{}<h1>{} <span class=sub>overview</span></h1>\
 <div class=stats><div class=stat><b>{open}</b><span>open</span></div><div class=stat><b>{}</b><span>sources</span></div>\
@@ -837,8 +933,8 @@ fn page_overview(store: &Store, project: &str) -> Result<String> {
 <h2>Actions</h2><div class=actions>{}{}{}{}{} <a class=btn href=\"/p/{}/incidents\">All incidents →</a></div>\
 <p class=sub>Warm/Sweep/Calibrate/Investigate run the engine in place — results appear below.</p>\
 <div id=actout></div>{RUNACT_JS}\
-<h2>Recent incidents</h2><div class=tablewrap><table><colgroup><col class=sm><col class=sm><col class=sigcol></colgroup>\
-<tr><th>Sev</th><th>Count</th><th>Signature</th></tr>{}</table></div>",
+<h2>Recent incidents</h2><div class=tablewrap><table><colgroup><col class=sm><col class=md><col class=sm><col class=sigcol></colgroup>\
+<tr><th>Sev</th><th>Status</th><th>Count</th><th>Signature</th></tr>{}</table></div>",
         subnav(project, "ov", ""), esc(project), srcs.len(), policy.len(),
         act("warm", "⚙ Warm policy", "pri", "One engine call drafts the Tier-1 mute/watch/escalate policy from this project's templates"),
         act("sweep", "🔎 Sweep", "", "Investigate every open escalate-routed incident now (batch)"),
@@ -863,7 +959,7 @@ fn page_incidents(store: &Store, project: &str, page: usize) -> Result<String> {
     Ok(shell_proj(project, &body, "Incidents"))
 }
 
-fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<String> {
+fn page_incident(store: &Store, project: &str, id: i64, tab: &str, ask_q: Option<&str>, ask_state: AskState) -> Result<String> {
     let Some((i, evidence)) = store.get_incident(project, id)? else {
         return Ok(shell_proj(project, "<h1>Incident not found</h1>", "Incident"));
     };
@@ -898,8 +994,9 @@ fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<Str
                 "<div class=kv>\
 <form class=inline method=post action=\"/p/{p}/incident/{id}/feedback\"><input type=hidden name=verdict value=accept><button class=\"btn pri\" title=\"Confirm this finding is real: resolves the incident, keeps the signature on escalate, and suppresses future recurrences\">✓ Accept (resolve · keep escalate)</button></form>\
 <form class=inline method=post action=\"/p/{p}/incident/{id}/feedback\"><input type=hidden name=verdict value=reject><button class=\"btn dn\" title=\"Mark as noise/false alarm: mutes this signature so it won't escalate or spend engine calls again\">✕ Reject as noise (mute)</button></form>\
-<a class=btn href=\"/p/{p}/incident/{id}?tab=fix\" title=\"See the proposed patch, its validation, and the branch/PR\">View fix →</a></div>\
-<p class=sub>Follow-up in NL: <code>vigil ask \"…\" --project {}</code></p>", esc(project)));
+<a class=btn href=\"/p/{p}/incident/{id}?tab=fix\" title=\"See the proposed patch, its validation, and the branch/PR\">View fix →</a></div>"));
+            // inline "ask the engine about THIS incident" (real engine call, in-page)
+            body.push_str(&render_incident_ask(project, id, ask_q, &ask_state));
         }
         "evidence" => {
             if let Some(ev) = evidence.as_ref().and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok()) {
@@ -911,15 +1008,22 @@ fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<Str
                     body.push_str(&format!("<div class=kv><span class=\"pill amber\">host pressure</span> <span class=mono>{}</span></div>", esc(pr)));
                 }
                 if let Some(cl) = ev.get("clusters").and_then(|v| v.as_array()) {
-                    body.push_str("<div class=clus style=\"margin-top:8px\">");
+                    body.push_str("<div class=sub style=\"margin:10px 0 6px;font-weight:600\">Log clusters · real lines (actual text, not the masked pattern)</div>");
                     for c in cl.iter().take(8) {
-                        body.push_str(&format!("<div class=cr><span class=cn>×{}</span><span class=ct title=\"{}\">[{}] {}</span></div>",
-                            c.get("count").and_then(|v| v.as_i64()).unwrap_or(0),
-                            esc(c.get("template").and_then(|v| v.as_str()).unwrap_or("")),
-                            esc(c.get("service").and_then(|v| v.as_str()).unwrap_or("")),
-                            esc(&preview(c.get("template").and_then(|v| v.as_str()).unwrap_or(""), 90))));
+                        let count = c.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let service = c.get("service").and_then(|v| v.as_str()).unwrap_or("");
+                        let template = c.get("template").and_then(|v| v.as_str()).unwrap_or("");
+                        let exemplar = c.get("exemplar").and_then(|v| v.as_str()).unwrap_or("");
+                        let tid = c.get("id").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches("cluster:");
+                        let real = if exemplar.trim().is_empty() { template } else { exemplar };
+                        body.push_str(&format!(
+                            "<div style=\"margin-bottom:11px\"><div class=kv style=\"margin:0 0 5px\"><span class=\"pill red\">×{count}</span>{}<span class=sub>pattern: <code>{}</code></span></div>\
+<pre class=rawlog>{}</pre>{}</div>",
+                            if service.is_empty() { String::new() } else { format!("<span class=pill>{}</span>", esc(service)) },
+                            esc(&preview(template, 70)),
+                            esc(real.trim_end()),
+                            raw_samples_html(store, project, tid, 8)));
                     }
-                    body.push_str("</div>");
                 }
                 if let Some(stack) = ev.get("stack").and_then(|v| v.as_array()) {
                     for fr in stack.iter().take(6) {
@@ -958,6 +1062,64 @@ fn page_incident(store: &Store, project: &str, id: i64, tab: &str) -> Result<Str
     Ok(shell_proj(project, &body, &format!("incident {id}")))
 }
 
+/// Inline "ask the engine about THIS incident" — quick-question buttons + a
+/// free-text box, answered in-page via the async ask_jobs poller (a real engine
+/// call, scoped & cached by the incident-specific question).
+fn render_incident_ask(project: &str, id: i64, ask_q: Option<&str>, state: &AskState) -> String {
+    let p = urlenc(project);
+    let base = format!("/p/{p}/incident/{id}");
+    let quick = |label: &str, q: &str| format!(
+        "<a class=btn href=\"{base}?ask={}\" title=\"Ask the engine: {}\">{label}</a>", urlenc(q), esc(q));
+    let buttons = format!("{}{}{}",
+        quick("Why did this happen?", "What is the root cause of this incident?"),
+        quick("How do I fix it?", "How do I fix this incident? Give concrete steps and, if possible, a patch."),
+        quick("Is it resolved?", "Is this incident resolved or still active, and how do I confirm?"));
+    let qval = ask_q.map(esc).unwrap_or_default();
+    let answer = match state {
+        AskState::Done(ok, out) => format!(
+            "<div class=card style=\"margin-top:10px\"><div class=sub>Q: {}</div><div id=ans class=\"cause cause2 show\">{}</div></div>",
+            esc(ask_q.unwrap_or("")),
+            if *ok { format_cause(out) } else { format!("<div class=flash bad>{}</div>", esc(out)) }),
+        AskState::Running => format!(
+            "<div class=card style=\"margin-top:10px\"><div class=sub>Q: {}</div>\
+<div class=thinking><span class=sh></span><span id=phr>Reading this incident's evidence</span><span class=dots></span></div>\
+<div id=ans class=\"cause cause2\"></div></div>{POLLER_JS}",
+            esc(ask_q.unwrap_or(""))),
+        AskState::None => String::new(),
+    };
+    format!(
+        "<h2>Ask the engine about this incident</h2>\
+<form class=ask method=get action=\"{base}\"><input name=ask placeholder=\"ask anything about this incident…\" value=\"{qval}\">\
+<button id=askbtn class=\"btn pri\" type=submit title=\"Run your engine on this incident — grounded, cited, cached\" onclick=\"this.disabled=true;this.textContent='Asking…'\">Ask</button></form>\
+<div class=actions style=\"margin-top:-4px\">{buttons}</div>\
+<p class=help>Runs <code>vigil ask</code> on your engine, scoped to this incident. Same question is cached — reloads don't re-ask.</p>{answer}")
+}
+
+/// Live source-log viewer — the real tail of a watched file (bounded), so you can
+/// see the actual lines flowing, not just mined templates.
+fn page_source(store: &Store, project: &str, path: &str) -> Result<String> {
+    let known = store.list_sources(project)?.iter().any(|s| s == path);
+    let p = urlenc(project);
+    let body = if path.is_empty() || !known {
+        format!("{}<h1>{} · source</h1><div class=empty>Unknown source. Pick one from <a href=\"/p/{p}/sources\">Sources</a>.</div>",
+            subnav(project, "src", ""), esc(project))
+    } else {
+        // last 500 lines, reading at most the trailing 512 KB (handles huge logs).
+        let (size, tail) = tail_file(path, 500, 512 * 1024).unwrap_or((0, String::new()));
+        let shown = tail.lines().count();
+        let content = if tail.trim().is_empty() {
+            "<div class=empty>No readable lines yet (file empty, rotated, or not present on this host).</div>".to_string()
+        } else {
+            format!("<pre class=rawlog style=\"max-height:none\">{}</pre>", esc(&tail))
+        };
+        format!(
+            "{}<p class=sub><a href=\"/p/{p}/sources\">← sources</a></p><h1 class=mono style=\"font-size:17px\">{}</h1>\
+<p class=sub>live tail · showing the last {shown} line(s) · file is {} KB on disk · <a href=\"/p/{p}/source?path={}\">↻ refresh</a></p>{content}",
+            subnav(project, "src", ""), esc(path), size / 1024, urlenc(path))
+    };
+    Ok(shell_proj(project, &body, "Source"))
+}
+
 /// A clickable, expandable template cell — preview by default, full text on click.
 fn tpl_details(sig: &str) -> String {
     format!("<details class=tpl><summary>{}</summary><pre>{}</pre></details>", esc(&preview(sig, 110)), esc(sig))
@@ -975,13 +1137,32 @@ fn render_diff(patch: &str) -> String {
 
 fn page_sources(store: &Store, project: &str) -> Result<String> {
     let srcs = store.list_sources(project)?;
+    let p = urlenc(project);
     let mut rows = String::new();
-    for s in &srcs { rows.push_str(&format!("<div class=srcrow><span class=\"pill green\">watching</span><span class=nm>{}</span></div>", esc(s))); }
-    if srcs.is_empty() { rows.push_str("<div class=empty>No sources.</div>"); }
+    for s in &srcs {
+        rows.push_str(&format!(
+            "<div class=srcrow><span class=\"pill green\">watching</span><span class=nm>{}</span>\
+<span class=pr><a class=back href=\"/p/{p}/source?path={}\" title=\"See the real, live tail of this log file\">view logs →</a></span></div>",
+            esc(s), urlenc(s)));
+    }
+    if srcs.is_empty() { rows.push_str("<div class=empty>No log sources.</div>"); }
+    // The repo (if configured) is a read-only CODE source: not a monitored log,
+    // but its PATH is shared with the engine to ground stack traces & validate fixes.
+    let code = match store.get_project(project)?.and_then(|pr| pr.repo) {
+        Some(repo) if !repo.is_empty() => format!(
+            "<h2>Code source · shared with the engine (read-only)</h2>\
+<div class=srcrow><span class=\"pill blue\">code · read-only</span><span class=nm>{}</span>\
+<span class=pr>grounds stack traces &amp; fix validation</span></div>\
+<p class=help>This repo path is sent to the engine for grounding — it is <b>not</b> a monitored log. Set/clear it in <a href=\"/p/{p}/config\">Config</a>.</p>",
+            esc(&repo)),
+        _ => format!("<h2>Code source</h2><div class=empty>No repo attached. Add one in <a href=\"/p/{p}/config\">Config</a> so the engine can ground stack traces in your source (read-only).</div>"),
+    };
     let scope = "<span class=scope><a class=on href=#>this project</a><a href=/sources>all projects</a></span>";
     let body = format!(
-        "{}<h1>{} · sources</h1><p class=sub>this system's containers/services — one project, many sources</p>{rows}\
-<form method=post action=sources/add><div class=ask><input name=path placeholder=\"/path/to/another/container.log\"><button class=\"btn pri\" type=submit title=\"Attach another container/service log to this project — all sources are correlated together\">+ Add source</button></div></form>",
+        "{}<h1>{} · sources</h1><p class=sub>this system's containers/services — one project, many sources</p>\
+<h2>Log sources · monitored</h2>{rows}\
+<form method=post action=sources/add><div class=ask><input name=path placeholder=\"/path/to/another/container.log\"><button class=\"btn pri\" type=submit title=\"Attach another container/service log to this project — all sources are correlated together\">+ Add source</button></div></form>\
+{code}",
         subnav(project, "src", scope), esc(project)
     );
     Ok(shell_proj(project, &body, "Sources"))
@@ -1049,13 +1230,14 @@ fn page_config(store: &Store, project: &str) -> Result<String> {
             let eng_opts: String = ["claude-cli", "cursor-cli", "anthropic-api", "local", "none"].iter().map(|e| opt(e, &p.engine)).collect();
             let auto_opts: String = ["notify", "report", "propose", "merge", "release"].iter().map(|a| opt(a, &p.autonomy)).collect();
             format!(
-                "{}<h1>{} · Config</h1><p class=sub>per-project settings · editable here · overrides the portfolio defaults</p>\
+                "{}<h1>{} · Config</h1><p class=sub>per-project settings · editable here · overrides the portfolio defaults · every option is explained inline</p>\
 <form method=post action=config><div class=card>\
-<div class=setrow><b>Engine</b><select name=engine class=v>{}</select></div>\
-<div class=setrow><b>Autonomy</b><select name=autonomy class=v>{}</select></div>\
-<div class=setrow><b>Min confidence</b><input class=v name=min_confidence value=\"{:.2}\" style=\"width:90px;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
-<div class=setrow><b>Repo @ SHA</b><input class=v name=repo value=\"{}\" placeholder=\"/path/to/repo\" style=\"flex:1;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
-<div class=actions style=\"margin-top:12px\"><button class=\"btn pri\" type=submit title=\"Persist this project's engine, autonomy, confidence threshold and repo (overrides portfolio defaults)\">Save config</button></div></div></form>\
+<div class=setrow><div style=\"flex:1\"><b>Engine</b><p class=help>Which LLM does the reasoning — your choice, on your box. <code>claude-cli</code>/<code>cursor-cli</code> use your logged-in seat (no key); <code>anthropic-api</code> uses <code>ANTHROPIC_API_KEY</code>; <code>local</code> uses on-box Ollama; <code>none</code> = deterministic pipeline only (no root-cause).</p></div><select name=engine class=v>{}</select></div>\
+<div class=actions style=\"margin:-4px 0 6px\"><button type=button class=btn onclick=\"testEngine(this)\" title=\"Probe the selected engine for reachability/auth — no prompt spent\">⚡ Test connection</button></div><div id=engtest></div>\
+<div class=setrow><div style=\"flex:1\"><b>Autonomy</b><p class=help><b>notify</b> — tell a human only (safest). &nbsp;<b>report</b> — write a cited RCA, no code change. &nbsp;<b>propose</b> — open a PR with the validated fix. &nbsp;<b>merge</b> — open + auto-merge (your CI is the gate). &nbsp;<b>release</b> — hand to your CD. VigilAI never deploys directly; its ceiling is a scoped git token.</p></div><select name=autonomy class=v>{}</select></div>\
+<div class=setrow><div style=\"flex:1\"><b>Min confidence</b><p class=help>A code action (PR) is only allowed when the engine's confidence ≥ this. 0–1; higher = more cautious. Findings below it are still reported, just not acted on.</p></div><input class=v name=min_confidence value=\"{:.2}\" style=\"width:90px;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
+<div class=setrow><div style=\"flex:1\"><b>Repo path</b><p class=help>Read-only path to this system's source. Shared with the engine to ground stack traces and validate fixes in a throwaway worktree off your deployed SHA. Not a monitored log; never written to.</p></div><input class=v name=repo value=\"{}\" placeholder=\"/path/to/repo\" style=\"flex:1;border:1px solid #ECE6DA;border-radius:6px;padding:5px 8px\"></div>\
+<div class=actions style=\"margin-top:12px\"><button class=\"btn pri\" type=submit title=\"Persist this project's engine, autonomy, confidence threshold and repo (overrides portfolio defaults)\">Save config</button></div></div></form>{ENGTEST_JS}\
 <h2>Context &amp; usage</h2><div class=card>{}{}</div>",
                 subnav(project, "cfg", ""), esc(project), eng_opts, auto_opts, p.min_confidence,
                 esc(p.repo.as_deref().unwrap_or("")),
