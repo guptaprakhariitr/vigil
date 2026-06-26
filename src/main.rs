@@ -48,7 +48,7 @@ enum Cmd {
         repo: Option<PathBuf>,
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value = "claude-cli")]
         engine: String,
@@ -78,7 +78,7 @@ enum Cmd {
         repo: Option<PathBuf>,
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value = "claude-cli")]
         engine: String,
@@ -93,7 +93,7 @@ enum Cmd {
     /// under one global token budget. Skips paused projects; sheds its own load
     /// (detection-only) when it exceeds the resource budget.
     Run {
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value_t = 15)]
         interval: u64,
@@ -109,26 +109,29 @@ enum Cmd {
         max_rss_mb: u64,
         #[arg(long)]
         no_engine: bool,
+        /// Override every project's saved engine for this run only (parity with up/sweep).
+        #[arg(long)]
+        engine: Option<String>,
     },
     /// Pause the scheduler for a project (or `*` = all). `up`/`run` skip it.
     Pause {
         #[arg(default_value = "*")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Resume a paused project (or `*` = all).
     Resume {
         #[arg(default_value = "*")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Live terminal dashboard (incidents, policy, health) — refreshes in place.
     Tui {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value_t = 3)]
         interval: u64,
@@ -140,7 +143,7 @@ enum Cmd {
     Serve {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value_t = 8787)]
         port: u16,
@@ -151,25 +154,31 @@ enum Cmd {
     },
     /// Show daemon health: events seen, open incidents, footprint.
     Status {
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// List grouped incidents from the store.
     Incidents {
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
-    /// Manage the project registry (portfolio). `add` / `list`.
+    /// Manage the project registry (portfolio). `add` / `list` / `update` / `add-source`.
     Project {
         #[command(subcommand)]
         cmd: ProjectCmd,
+    },
+    /// Engine connectivity: probe that the selected/saved engine is reachable and
+    /// authenticated (no meaningful prompt spent). `vigil engine check [--engine X]`.
+    Engine {
+        #[command(subcommand)]
+        cmd: EngineCmd,
     },
     /// Warm-setup: one engine call drafts the Tier-1 routing policy from observed templates.
     Warm {
         path: PathBuf,
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value = "claude-cli")]
         engine: String,
@@ -181,7 +190,7 @@ enum Cmd {
     Policy {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Feedback: set a template's route by id prefix (mute|watch|escalate).
@@ -192,7 +201,7 @@ enum Cmd {
         template: String,
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Learning loop: judge a finding (accept|reject) → deterministic Tier-1 rule delta.
@@ -203,7 +212,7 @@ enum Cmd {
         incident: String,
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         /// on reject: treat as pure noise → mute the template outright
         #[arg(long)]
@@ -216,7 +225,7 @@ enum Cmd {
     Calibrate {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value = "claude-cli")]
         engine: String,
@@ -233,7 +242,7 @@ enum Cmd {
         question: String,
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value = "claude-cli")]
         engine: String,
@@ -242,21 +251,21 @@ enum Cmd {
     Metrics {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Token ledger: engine calls + estimated tokens for a project.
     Usage {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Append-only audit trail of decisions taken.
     Audit {
         #[arg(long, default_value = "default")]
         project: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
         #[arg(long, default_value_t = 20)]
         limit: i64,
@@ -266,7 +275,7 @@ enum Cmd {
     Telemetry {
         #[arg(default_value = "status")]
         action: String,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Check for a newer release (and, with --apply, download + replace this binary).
@@ -344,19 +353,48 @@ enum ProjectCmd {
         autonomy: String,
         #[arg(long, default_value_t = 0.7)]
         min_confidence: f64,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// List registered projects and their open-incident feed.
     List {
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
     /// Attach another log source (a container/service) to an existing project.
     AddSource {
         name: String,
         path: PathBuf,
-        #[arg(long, default_value = "vigil.db")]
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
+        db: String,
+    },
+    /// Update a project's config (engine/autonomy/repo/min-confidence) WITHOUT
+    /// touching its sources — the non-destructive way to change a setting.
+    Update {
+        name: String,
+        #[arg(long)]
+        engine: Option<String>,
+        #[arg(long)]
+        autonomy: Option<String>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        min_confidence: Option<f64>,
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
+        db: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EngineCmd {
+    /// Probe reachability/auth for an engine (or the project's saved engine).
+    Check {
+        /// Engine to probe; defaults to the project's saved engine.
+        #[arg(long)]
+        engine: Option<String>,
+        #[arg(long, default_value = "default")]
+        project: String,
+        #[arg(long, env = "VIGIL_DB", default_value = "vigil.db")]
         db: String,
     },
 }
@@ -698,7 +736,7 @@ fn main() -> Result<()> {
             println!("· sweep done — {investigated} investigated, {skipped} already known");
         }
 
-        Cmd::Run { db, interval, once, max_iterations, token_budget, max_rss_mb, no_engine } => {
+        Cmd::Run { db, interval, once, max_iterations, token_budget, max_rss_mb, no_engine, engine: engine_override } => {
             let mut store = Store::open(&db)?;
             if store.list_projects()?.is_empty() {
                 return Err(anyhow::anyhow!("no projects registered — use `vigil project add <name> <logs>`"));
@@ -726,7 +764,8 @@ fn main() -> Result<()> {
                         eprintln!("· over RSS budget ({}MB) — detection only this round", max_rss_mb);
                     }
                     let mut tick_budget = if rss_block { Some(0) } else { budget };
-                    let adapter = make_engine(no_engine, &p.engine)?;
+                    let eng = engine_override.as_deref().unwrap_or(&p.engine);
+                    let adapter = make_engine(no_engine, eng)?;
                     let policy = store.load_policy(&p.name)?;
                     let autonomy = vigil_engine::policy::Autonomy::parse(&p.autonomy);
                     let sources: Vec<PathBuf> = store.list_sources(&p.name)?.into_iter().map(PathBuf::from).collect();
@@ -758,6 +797,15 @@ fn main() -> Result<()> {
             dash::tui(&db, &project, interval, once)?;
         }
         Cmd::Serve { project, db, port, token } => {
+            // Guard the classic footgun: serving a fresh/empty db shows "0 projects"
+            // and looks broken. Warn loudly and point at --db / VIGIL_DB (feedback #3).
+            let existed = std::path::Path::new(&db).exists();
+            let nproj = Store::open(&db)?.list_projects()?.len();
+            if !existed || nproj == 0 {
+                eprintln!("⚠ no projects in '{db}'{}.", if existed { "" } else { " (it didn't exist — created empty)" });
+                eprintln!("  If your state lives elsewhere, stop and re-run with `--db <path>` (or `export VIGIL_DB=<path>`).");
+                eprintln!("  Otherwise register one first: `vigil project add <name> <logs> --db {db}`.\n");
+            }
             dash::serve(&db, &project, port, token)?;
         }
 
@@ -801,6 +849,14 @@ fn main() -> Result<()> {
         Cmd::Project { cmd } => match cmd {
             ProjectCmd::Add { name, path, repo, engine, autonomy, min_confidence, db } => {
                 let store = Store::open(&db)?;
+                // Non-destructive: re-adding an existing project updates its config
+                // and adds <path> as a source; it never drops sources (feedback #6).
+                if let Some(existing) = store.get_project(&name)? {
+                    let nsrc = store.list_sources(&name)?.len();
+                    eprintln!("· project '{name}' already exists ({nsrc} source(s)) — updating config; sources are preserved.");
+                    eprintln!("  (to change only a setting without adding a source, use `vigil project update {name} --engine …`)");
+                    let _ = existing;
+                }
                 store.add_project(&vigil_engine::store::Project {
                     name: name.clone(),
                     log_path: path.display().to_string(),
@@ -809,7 +865,25 @@ fn main() -> Result<()> {
                     autonomy: vigil_engine::policy::Autonomy::parse(&autonomy).as_str().to_string(),
                     min_confidence,
                 })?;
-                println!("✓ registered project '{name}' (run `vigil up --project {name}`)");
+                let srcs = store.list_sources(&name)?;
+                println!("✓ registered project '{name}' ({} source(s)) — run `vigil up --project {name}`", srcs.len());
+            }
+            ProjectCmd::Update { name, engine, autonomy, repo, min_confidence, db } => {
+                let store = Store::open(&db)?;
+                let Some(mut p) = store.get_project(&name)? else {
+                    return Err(anyhow::anyhow!("project '{name}' is not registered — `vigil project add {name} <logs>` first"));
+                };
+                if let Some(e) = engine { p.engine = e; }
+                if let Some(a) = autonomy { p.autonomy = vigil_engine::policy::Autonomy::parse(&a).as_str().to_string(); }
+                if let Some(r) = repo { p.repo = Some(r.display().to_string()); }
+                if let Some(m) = min_confidence { p.min_confidence = m; }
+                // add_project upserts config; add_source(log_path) is INSERT-OR-IGNORE,
+                // so existing sources are untouched.
+                store.add_project(&p)?;
+                println!("✓ updated '{name}' · engine={} · autonomy={} · conf≥{:.2}{} · {} source(s) preserved",
+                    p.engine, p.autonomy, p.min_confidence,
+                    p.repo.as_ref().map(|r| format!(" · repo {r}")).unwrap_or_default(),
+                    store.list_sources(&name)?.len());
             }
             ProjectCmd::List { db } => {
                 let store = Store::open(&db)?;
@@ -840,6 +914,26 @@ fn main() -> Result<()> {
                 store.add_source(&name, &path.display().to_string())?;
                 let srcs = store.list_sources(&name)?;
                 println!("✓ added source to '{name}' ({} total): {}", srcs.len(), srcs.join(", "));
+            }
+        },
+
+        Cmd::Engine { cmd } => match cmd {
+            EngineCmd::Check { engine, project, db } => {
+                let store = Store::open(&db)?;
+                // Resolve which engine to probe: explicit flag, else the project's saved one.
+                let eng = match engine {
+                    Some(e) => e,
+                    None => store.get_project(&project)?.map(|p| p.engine).unwrap_or_else(|| "claude-cli".into()),
+                };
+                let adapter = make_engine(false, &eng)?;
+                print!("engine '{}' ({}): ", eng, adapter.name());
+                match adapter.check() {
+                    Ok(msg) => println!("✓ connected — {msg}"),
+                    Err(e) => {
+                        println!("✗ NOT connected — {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
 

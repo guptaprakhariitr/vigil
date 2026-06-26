@@ -23,8 +23,9 @@ Work through these steps with the user, confirming before anything that creates 
 ## 2. Get `vigil`
 - **Download the released binary** for the user's platform from
   https://github.com/guptaprakhariitr/vigil/releases (the engine is bundled in). Pick the asset
-  matching `uname -sm` (e.g. `vigil-aarch64-apple-darwin`, `vigil-x86_64-unknown-linux-gnu`), then
-  make it executable and **put it on PATH** so `vigil` runs from anywhere:
+  matching `uname -sm`: macOS → `vigil-aarch64-apple-darwin`; **Linux x86_64 → prefer the static
+  `vigil-x86_64-unknown-linux-musl`** (works on any Linux, no glibc dependency; the `-gnu` asset needs
+  glibc ≥ 2.39). Then make it executable and **put it on PATH** so `vigil` runs from anywhere:
   ```
   chmod +x vigil
   sudo mv vigil /usr/local/bin/vigil    # or: mkdir -p ~/.local/bin && mv vigil ~/.local/bin/ (ensure it's on PATH)

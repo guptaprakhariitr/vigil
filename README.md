@@ -48,8 +48,12 @@ chmod +x vigil
 sudo mv vigil /usr/local/bin/vigil      # or: mkdir -p ~/.local/bin && mv vigil ~/.local/bin/
 vigil --version
 ```
-Linux x86_64: swap the asset for `vigil-x86_64-unknown-linux-gnu`. If `~/.local/bin` isn't already on
-your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.zshrc` / `~/.bashrc`).
+**Linux x86_64** — two assets:
+- `vigil-x86_64-unknown-linux-musl` — **fully static; recommended.** Runs on any Linux (Ubuntu 20.04+, Alpine, …) with **no glibc version dependency**.
+- `vigil-x86_64-unknown-linux-gnu` — smaller, but needs a recent glibc (≥ 2.39, i.e. Ubuntu 24.04+). If you see `GLIBC_2.39 not found`, use the musl asset above.
+
+If `~/.local/bin` isn't already on your PATH, add `export PATH="$HOME/.local/bin:$PATH"` to your shell
+profile (`~/.zshrc` / `~/.bashrc`). Tip: `export VIGIL_DB=/path/to/vigil.db` once and every command uses it.
 **Or run anywhere** with Docker / Compose / Helm — see [docs/REFERENCE.md](docs/REFERENCE.md#deploy).
 
 The macOS binary is **Developer ID–signed and notarized by Apple** (Team `86F7TVY8RD`, hardened
