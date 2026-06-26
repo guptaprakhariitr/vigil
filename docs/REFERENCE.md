@@ -6,6 +6,8 @@ meaning, deploy guides, and a glossary. For the concepts behind it, see
 
 Common flags: `--db <file>` (the SQLite state store, default `vigil.db`) and `--project <name>`
 (default `default`) appear on most commands and are omitted from each table below for brevity.
+`--db` also reads the **`VIGIL_DB`** environment variable — `export VIGIL_DB=/path/to/vigil.db` once
+and every command (including `serve`) uses it, so you never repeat `--db`.
 
 ---
 
@@ -46,6 +48,7 @@ on the fly (it re-reads the registry each round); skips paused projects.
 | `--once` / `--max-iterations <n>` | single round / stop after N rounds. |
 | `--token-budget <n>` | global engine-token budget for the run (0 = unlimited). When exhausted, detection continues but no new engine calls are spent. |
 | `--max-rss-mb <n>` | resource budget: while VigilAI's own RSS exceeds this, it runs detection-only (sheds its own load). 0 = off. |
+| `--engine <e>` | override every project's saved engine for this run only (parity with `up`/`sweep`). |
 | `--no-engine` | deterministic-only across the portfolio. |
 
 ### `vigil sweep [path]` — batch investigate
@@ -55,9 +58,16 @@ Investigate **every** open escalate-routed incident in one pass (not just the do
 ### `vigil project …` — the registry
 | Subcommand | Meaning |
 |---|---|
-| `add <name> <path>` | register a project (its first source). Flags: `--repo`, `--engine`, `--autonomy`, `--min-confidence`. |
+| `add <name> <path>` | register a project (its first source). Flags: `--repo`, `--engine`, `--autonomy`, `--min-confidence`. Re-running on an existing name **updates config and preserves sources** (warns; never drops them). |
 | `add-source <name> <path>` | attach another source (container/service) to an existing project. **A project = one system, many sources.** |
+| `update <name>` | change config **without touching sources** — the non-destructive way. Flags: `--engine`, `--autonomy`, `--repo`, `--min-confidence` (only the ones you pass change). |
 | `list` | show all projects: autonomy, threshold, source count, open incidents, top signature. |
+
+### `vigil engine check` — connectivity probe
+Probe that an engine is reachable and authenticated **without spending a meaningful prompt** — checks
+the CLI binary is on PATH (`claude-cli`/`cursor-cli`), the API key is accepted (`anthropic-api`), or the
+server answers (`local`). Defaults to the project's saved engine; override with `--engine <e>`. Exits
+non-zero on failure with the real reason. Also available as a **Test connection** button in the web UI's Config.
 
 ### Tier-1 policy & learning
 | Command | Meaning |
