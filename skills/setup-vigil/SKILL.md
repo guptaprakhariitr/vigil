@@ -34,6 +34,9 @@ Work through these steps with the user, confirming before anything that creates 
 - Do NOT try to `cargo build` from this public repo — it depends on the private `vigil-engine` crate;
   source builds are maintainer-only.
 - Sanity check: `vigil --version`.
+- **Already set up on an older version?** This is just an upgrade: download the latest asset and replace
+  the binary on PATH (or run `vigil self-update --apply`). The state db auto-migrates — keep the same
+  `--db` / `VIGIL_DB` and existing projects/incidents are preserved. Skip straight to step 6 (verify).
 
 ## 3. Register the system as ONE project (many sources)
 A **project = one logical system; its containers are sources of that one project** — never one

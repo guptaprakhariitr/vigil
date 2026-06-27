@@ -302,6 +302,19 @@ enum Cmd {
     },
 }
 
+/// Print copy-pasteable, platform-aware manual upgrade commands (the db needs no
+/// migration — the schema auto-migrates on open, so any older state keeps working).
+fn print_manual_upgrade(repo: &str, tag: &str, asset: Option<&str>) {
+    match asset {
+        Some(a) => {
+            println!("    curl -fsSL -o vigil https://github.com/{repo}/releases/download/{tag}/{a}");
+            println!("    chmod +x vigil && sudo mv vigil \"$(command -v vigil || echo /usr/local/bin/vigil)\"");
+            println!("    vigil --version    # done — your existing --db / VIGIL_DB store works as-is");
+        }
+        None => println!("    see https://github.com/{repo}/releases/{tag} for your platform's asset"),
+    }
+}
+
 /// Pull the leading commit SHA out of a `recent_change` string like
 /// `ce92608 "refactor charge()"`.
 fn sha_of(rc: &str) -> Option<&str> {
@@ -1146,12 +1159,30 @@ contain the answer, say so plainly — do not speculate.\n\nQUESTION: {question}
                 None => println!("self-update: no releases published for {repo} yet (running v{current})"),
                 Some(tag) if vigil_engine::ops::is_newer(&tag, current) => {
                     println!("self-update: {tag} available (running v{current})");
+                    let asset = vigil_engine::ops::current_asset();
                     if apply {
-                        // Mechanism in place; the actual asset swap runs against a real
-                        // release. Until one is published, report the action.
-                        println!("→ download {tag} from https://github.com/{repo}/releases/{tag} and replace `$(which vigil)` (atomic swap).");
+                        match asset {
+                            Some(a) => {
+                                println!("· downloading {a} from {tag} and replacing this binary…");
+                                match vigil_engine::ops::apply_update(&repo, &tag, a, token.as_deref()) {
+                                    Ok(path) => {
+                                        println!("✓ updated → {} now {tag}", path.display());
+                                        println!("  (your state db auto-migrates on next open — no data migration needed)");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("! auto-update failed: {e}");
+                                        print_manual_upgrade(&repo, &tag, asset);
+                                    }
+                                }
+                            }
+                            None => {
+                                eprintln!("! no prebuilt asset for this platform ({}/{})", std::env::consts::OS, std::env::consts::ARCH);
+                                print_manual_upgrade(&repo, &tag, asset);
+                            }
+                        }
                     } else {
-                        println!("→ re-run with --apply to update.");
+                        println!("→ run `vigil self-update --apply` to update in place, or upgrade manually:");
+                        print_manual_upgrade(&repo, &tag, asset);
                     }
                 }
                 Some(tag) => println!("self-update: up to date (latest {tag}, running v{current})"),

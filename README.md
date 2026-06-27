@@ -63,6 +63,19 @@ quarantined, `xattr -dr com.apple.quarantine ./vigil` clears it.)
 > Building from source needs the private `vigil-engine` crate beside this repo, so it's for
 > maintainers; everyone else uses the released binary or container above.
 
+### Upgrading (backward compatible)
+
+New releases are **drop-in** — your existing state db auto-migrates on open (schema changes are
+additive), and all prior commands/flags keep working. Already set up on an older version? Upgrade with:
+
+```bash
+vigil self-update            # tells you if a newer release exists + the exact command
+vigil self-update --apply    # downloads the right asset for your platform and replaces the binary in place
+```
+Prefer to do it by hand — just re-download and replace (same as Install): grab the latest asset, `chmod +x`,
+`mv` it over your existing `vigil` on PATH. No data migration step; your `--db` / `VIGIL_DB` store is reused
+as-is. (Coding-agent users can simply re-run the `setup-vigil` prompt — it fetches the latest binary.)
+
 ## Try it in 60 seconds
 
 ```bash

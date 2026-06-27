@@ -1,6 +1,6 @@
 [package]
 name = "vigil"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "VigilAI CLI — the open wrapper. Phase-1: agentless `investigate`."
 license = "Apache-2.0"
